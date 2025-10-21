@@ -3,24 +3,30 @@ Common utilities for nanochat.
 """
 
 import os
+from pathlib import Path
 import re
 import logging
+from typing import Any, TypeAlias
 import torch
 import torch.distributed as dist
 
+FilePath: TypeAlias = os.PathLike[str] | str
+
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to log messages."""
+
     # ANSI color codes
     COLORS = {
-        'DEBUG': '\033[36m',    # Cyan
-        'INFO': '\033[32m',     # Green
-        'WARNING': '\033[33m',  # Yellow
-        'ERROR': '\033[31m',    # Red
-        'CRITICAL': '\033[35m', # Magenta
+        "DEBUG": "\033[36m",  # Cyan
+        "INFO": "\033[32m",  # Green
+        "WARNING": "\033[33m",  # Yellow
+        "ERROR": "\033[31m",  # Red
+        "CRITICAL": "\033[35m",  # Magenta
     }
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-    def format(self, record):
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+
+    def format(self, record: logging.LogRecord) -> str:
         # Add color to the level name
         levelname = record.levelname
         if levelname in self.COLORS:
@@ -28,38 +34,42 @@ class ColoredFormatter(logging.Formatter):
         # Format the message
         message = super().format(record)
         # Add color to specific parts of the message
-        if levelname == 'INFO':
+        if levelname == "INFO":
             # Highlight numbers and percentages
-            message = re.sub(r'(\d+\.?\d*\s*(?:GB|MB|%|docs))', rf'{self.BOLD}\1{self.RESET}', message)
-            message = re.sub(r'(Shard \d+)', rf'{self.COLORS["INFO"]}{self.BOLD}\1{self.RESET}', message)
+            message = re.sub(
+                r"(\d+\.?\d*\s*(?:GB|MB|%|docs))", rf"{self.BOLD}\1{self.RESET}", message
+            )
+            message = re.sub(
+                r"(Shard \d+)", rf"{self.COLORS['INFO']}{self.BOLD}\1{self.RESET}", message
+            )
         return message
+
 
 def setup_default_logging():
     handler = logging.StreamHandler()
-    handler.setFormatter(ColoredFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[handler]
-    )
+    handler.setFormatter(ColoredFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
+
 
 setup_default_logging()
 logger = logging.getLogger(__name__)
 
-def get_base_dir():
+
+def get_base_dir() -> Path:
     # co-locate nanochat intermediates with other cached data in ~/.cache (by default)
-    if os.environ.get("NANOCHAT_BASE_DIR"):
-        nanochat_dir = os.environ.get("NANOCHAT_BASE_DIR")
+    if nanochat_dir_str := os.environ.get("NANOCHAT_BASE_DIR"):
+        nanochat_dir = Path(nanochat_dir_str)
     else:
-        home_dir = os.path.expanduser("~")
-        cache_dir = os.path.join(home_dir, ".cache")
-        nanochat_dir = os.path.join(cache_dir, "nanochat")
-    os.makedirs(nanochat_dir, exist_ok=True)
+        nanochat_dir = Path(Path.home(), ".cache", "nanochat")
+    Path.mkdir(nanochat_dir, parents=True, exist_ok=True)
     return nanochat_dir
 
-def print0(s="",**kwargs):
-    ddp_rank = int(os.environ.get('RANK', 0))
+
+def print0(s: str = "", **kwargs: Any):
+    ddp_rank = int(os.environ.get("RANK", 0))
     if ddp_rank == 0:
         print(s, **kwargs)
+
 
 def print_banner():
     # Cool DOS Rebel font ASCII banner made with https://manytools.org/hacker-tools/ascii-banner/
@@ -75,19 +85,22 @@ def print_banner():
 """
     print0(banner)
 
+
 def is_ddp():
     # TODO is there a proper way
-    return int(os.environ.get('RANK', -1)) != -1
+    return int(os.environ.get("RANK", -1)) != -1
+
 
 def get_dist_info():
     if is_ddp():
-        assert all(var in os.environ for var in ['RANK', 'LOCAL_RANK', 'WORLD_SIZE'])
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        assert all(var in os.environ for var in ["RANK", "LOCAL_RANK", "WORLD_SIZE"])
+        ddp_rank = int(os.environ["RANK"])
+        ddp_local_rank = int(os.environ["LOCAL_RANK"])
+        ddp_world_size = int(os.environ["WORLD_SIZE"])
         return True, ddp_rank, ddp_local_rank, ddp_world_size
     else:
         return False, 0, 0, 1
+
 
 def compute_init():
     """Basic initialization that we keep doing over and over, so make common."""
@@ -104,13 +117,13 @@ def compute_init():
     # torch.backends.cudnn.benchmark = False
 
     # Precision
-    torch.set_float32_matmul_precision("high") # uses tf32 instead of fp32 for matmuls
+    torch.set_float32_matmul_precision("high")  # uses tf32 instead of fp32 for matmuls
 
     # Distributed setup: Distributed Data Parallel (DDP), optional
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     if ddp:
         device = torch.device("cuda", ddp_local_rank)
-        torch.cuda.set_device(device) # make "cuda" default to this device
+        torch.cuda.set_device(device)  # make "cuda" default to this device
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
     else:
@@ -121,16 +134,21 @@ def compute_init():
 
     return ddp, ddp_rank, ddp_local_rank, ddp_world_size, device
 
+
 def compute_cleanup():
     """Companion function to compute_init, to clean things up before script exit"""
     if is_ddp():
         dist.destroy_process_group()
 
+
 class DummyWandb:
     """Useful if we wish to not use wandb but have all the same signatures"""
+
     def __init__(self):
         pass
-    def log(self, *args, **kwargs):
+
+    def log(self, *args, **kwargs):  # type: ignore
         pass
+
     def finish(self):
         pass

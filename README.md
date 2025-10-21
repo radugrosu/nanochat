@@ -34,7 +34,7 @@ And then visit the URL shown. Make sure to access it correctly, e.g. on Lambda u
 
 ---
 
-<img width="2672" height="1520" alt="image" src="https://github.com/user-attachments/assets/ed39ddf8-2370-437a-bedc-0f39781e76b5" />
+<img width="2672" height="1520" alt="image" src="https://github.com/user-attachments/assets/ed39ddf8-2370-437a-bedc-0f39781e76b5" /> <!-- markdownlint-disable-line MD033 -->
 
 ---
 

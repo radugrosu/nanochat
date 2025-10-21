@@ -18,6 +18,7 @@ python -m pytest tests/test_rustbpe.py -v -s
 -v is verbose, -s is show prints
 """
 
+from typing import Callable, Iterable, ParamSpec
 import regex as re
 from collections import Counter, defaultdict
 import time
@@ -25,23 +26,33 @@ import rustbpe
 import tiktoken
 import pytest
 
+# HuggingFace tokenizer
+from tokenizers import Tokenizer as HFTokenizer
+from tokenizers import pre_tokenizers, decoders, Regex
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+
 GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
 
 # -----------------------------------------------------------------------------
 # Reference tokenizer, pretty much copy pasted and pruned a bit from minbpe
 
-def get_stats(ids, counts=None):
+
+def get_stats(
+    ids: list[int], counts: dict[tuple[int, int], int] | None = None
+) -> dict[tuple[int, int], int]:
     """
     Given a list of integers, return a dictionary of counts of consecutive pairs
     Example: [1, 2, 3, 1, 2] -> {(1, 2): 2, (2, 3): 1, (3, 1): 1}
     Optionally allows to update an existing dictionary of counts
     """
     counts = {} if counts is None else counts
-    for pair in zip(ids, ids[1:]): # iterate consecutive elements
+    for pair in zip(ids, ids[1:]):  # iterate consecutive elements
         counts[pair] = counts.get(pair, 0) + 1
     return counts
 
-def merge(ids, pair, idx):
+
+def merge(ids: list[int], pair: tuple[int, int], idx: int) -> list[int]:
     """
     In the list of integers (ids), replace all consecutive occurrences
     of pair with the new integer token idx
@@ -51,7 +62,7 @@ def merge(ids, pair, idx):
     i = 0
     while i < len(ids):
         # if not at the very last position AND the pair matches, replace it
-        if ids[i] == pair[0] and i < len(ids) - 1 and ids[i+1] == pair[1]:
+        if ids[i] == pair[0] and i < len(ids) - 1 and ids[i + 1] == pair[1]:
             newids.append(idx)
             i += 2
         else:
@@ -59,16 +70,16 @@ def merge(ids, pair, idx):
             i += 1
     return newids
 
-class RegexTokenizer:
 
-    def __init__(self, pattern=None):
+class RegexTokenizer:
+    def __init__(self, pattern: str | None = None):
         """
         - pattern: optional string to override the default (GPT-4 split pattern)
         - special_tokens: str -> int dictionary of special tokens
           example: {'<|endoftext|>': 100257}
         """
         self.pattern = GPT4_SPLIT_PATTERN if pattern is None else pattern
-        self.merges = {} # (int, int) -> int
+        self.merges = {}  # (int, int) -> int
         self.compiled_pattern = re.compile(self.pattern)
         self.special_tokens = {}
         self.inverse_special_tokens = {}
@@ -83,7 +94,7 @@ class RegexTokenizer:
             vocab[idx] = special.encode("utf-8")
         return vocab
 
-    def train(self, text, vocab_size, verbose=False):
+    def train(self, text: str, vocab_size: int, verbose: bool = False):
         assert vocab_size >= 256
         num_merges = vocab_size - 256
 
@@ -94,19 +105,19 @@ class RegexTokenizer:
         text_chunks = re.findall(self.compiled_pattern, text)
 
         # input text preprocessing
-        ids = [list(ch.encode("utf-8")) for ch in text_chunks]
+        ids: list[list[int]] = [list(ch.encode("utf-8")) for ch in text_chunks]
 
         # iteratively merge the most common pairs to create new tokens
-        merges = {} # (int, int) -> int
-        vocab = {idx: bytes([idx]) for idx in range(256)} # idx -> bytes
+        merges: dict[tuple[int, int], int] = {}  # (int, int) -> int
+        vocab = {idx: bytes([idx]) for idx in range(256)}  # idx -> bytes
         for i in range(num_merges):
             # count the number of times every consecutive pair appears
-            stats = {}
+            stats: dict[tuple[int, int], int] = {}
             for chunk_ids in ids:
                 # passing in stats will update it in place, adding up counts
                 get_stats(chunk_ids, stats)
             # find the pair with the highest count
-            pair = max(stats, key=stats.get)
+            pair = max(stats, key=stats.__getitem__)
             # check if the merge is ambiguous - i.e. the max value is not unique
             pair_count = stats[pair]
             pairs_with_max_count = [pair for pair, count in stats.items() if count == pair_count]
@@ -125,14 +136,16 @@ class RegexTokenizer:
             vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
             # prints
             if verbose:
-                print(f"merge {i+1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
+                print(
+                    f"merge {i + 1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences"
+                )
 
         # save class variables
-        self.merges = merges # used in encode()
-        self.vocab = vocab   # used in decode()
+        self.merges = merges  # used in encode()
+        self.vocab = vocab  # used in decode()
         return ambiguous
 
-    def _encode_chunk(self, text_bytes):
+    def _encode_chunk(self, text_bytes: bytes) -> list[int]:
         # return the token ids
         # let's begin. first, convert all bytes to integers in range 0..255
         ids = list(text_bytes)
@@ -145,28 +158,30 @@ class RegexTokenizer:
             # just the first pair in the list, arbitrarily
             # we can detect this terminating case by a membership check
             if pair not in self.merges:
-                break # nothing else can be merged anymore
+                break  # nothing else can be merged anymore
             # otherwise let's merge the best pair (lowest merge index)
             idx = self.merges[pair]
             ids = merge(ids, pair, idx)
         return ids
 
-    def encode_ordinary(self, text):
+    def encode_ordinary(self, text: str) -> list[int]:
         """Encoding that ignores any special tokens."""
         # split text into chunks of text by categories defined in regex pattern
         text_chunks = re.findall(self.compiled_pattern, text)
         # all chunks of text are encoded separately, then results are joined
         ids = []
         for chunk in text_chunks:
-            chunk_bytes = chunk.encode("utf-8") # raw bytes
+            chunk_bytes = chunk.encode("utf-8")  # raw bytes
             chunk_ids = self._encode_chunk(chunk_bytes)
             ids.extend(chunk_ids)
         return ids
 
+
 # -----------------------------------------------------------------------------
 # Faster Python tokenizer, optimized version of the reference tokenizer
 
-def fast_merge_inplace(ids, pair, idx):
+
+def fast_merge_inplace(ids: list[int], pair: tuple[int, int], idx: int):
     """
     In the list of integers (ids), replace all consecutive occurrences
     of pair with the new integer token idx in place
@@ -175,17 +190,15 @@ def fast_merge_inplace(ids, pair, idx):
     # Find all positions where the pair occurs
     i = 0
     while i < len(ids) - 1:
-        if ids[i] == pair[0] and ids[i+1] == pair[1]:
+        if ids[i] == pair[0] and ids[i + 1] == pair[1]:
             ids[i] = idx
-            ids.pop(i+1)
+            ids.pop(i + 1)
         else:
             i += 1
-    return ids
 
 
 class FastRegexTokenizer:
-
-    def __init__(self, pattern=None):
+    def __init__(self, pattern: str | None = None):
         """
         - pattern: optional string to override the default (GPT-4 split pattern)
         - special_tokens: str -> int dictionary of special tokens
@@ -207,7 +220,7 @@ class FastRegexTokenizer:
             vocab[idx] = special.encode("utf-8")
         return vocab
 
-    def train(self, text, vocab_size, verbose=False):
+    def train(self, text: str, vocab_size: int, verbose: bool = False):
         """
         A number of optimizations are introduced:
         - delete function call overhead by inlining functions
@@ -219,22 +232,24 @@ class FastRegexTokenizer:
         num_merges = vocab_size - 256
 
         # split the text up into text chunks
-        text_chunks = re.findall(self.compiled_pattern, text)
+        text_chunks: list[str] = re.findall(self.compiled_pattern, text)
 
         # many, many chunks are identical, so we can "collapse" them to just the unique ones
         counts = Counter(text_chunks)
-        unique_chunks = [ch for ch, count in counts.items()]
-        chunk_counts = [count for ch, count in counts.items()]
+        unique_chunks = [ch for ch in counts]
+        chunk_counts = [count for count in counts.values()]
 
         # input text preprocessing
         ids = [list(ch.encode("utf-8")) for ch in unique_chunks]
         # iteratively merge the most common pairs to create new tokens
-        merges = {} # (int, int) -> int
-        vocab = {idx: bytes([idx]) for idx in range(256)} # idx -> bytes
+        merges: dict[tuple[int, int], int] = {}  # (int, int) -> int
+        vocab = {idx: bytes([idx]) for idx in range(256)}  # idx -> bytes
 
         # Initial count: build stats and position tracking
-        stats = defaultdict(int)
-        positions = defaultdict(set)  # pair -> set of chunk indices that contain this pair
+        stats: dict[tuple[int, int], int] = defaultdict(int)
+        positions: dict[tuple[int, int], set[int]] = defaultdict(
+            set
+        )  # pair -> set of chunk indices that contain this pair
 
         for chunk_idx, (chunk_ids, count) in enumerate(zip(ids, chunk_counts)):
             for pair in zip(chunk_ids, chunk_ids[1:]):
@@ -246,7 +261,7 @@ class FastRegexTokenizer:
                 break
 
             # find the pair with the highest count
-            pair = max(stats, key=stats.get)
+            pair = max(stats, key=stats.__getitem__)
             # mint a new token: assign it the next available id
             idx = 256 + i
 
@@ -254,7 +269,7 @@ class FastRegexTokenizer:
             affected_chunks = positions[pair]
 
             # Track count changes for incremental update
-            count_changes = defaultdict(int)
+            count_changes: dict[tuple[int, int], int] = defaultdict(int)
 
             # Replace all occurrences of pair in affected chunks only
             for chunk_idx in affected_chunks:
@@ -262,31 +277,31 @@ class FastRegexTokenizer:
                 chunk_count = chunk_counts[chunk_idx]
                 ix = 0
                 while ix < len(chunk_ids) - 1:
-                    if chunk_ids[ix] == pair[0] and chunk_ids[ix+1] == pair[1]:
+                    if chunk_ids[ix] == pair[0] and chunk_ids[ix + 1] == pair[1]:
                         # Track what pairs are being removed/added
                         # Remove: (prev, A), (A, B), (B, next)
                         if ix > 0:
-                            old_left = (chunk_ids[ix-1], chunk_ids[ix])
+                            old_left = (chunk_ids[ix - 1], chunk_ids[ix])
                             count_changes[old_left] -= chunk_count
 
                         # The merged pair disappears
                         count_changes[pair] -= chunk_count
 
                         if ix + 2 < len(chunk_ids):
-                            old_right = (chunk_ids[ix+1], chunk_ids[ix+2])
+                            old_right = (chunk_ids[ix + 1], chunk_ids[ix + 2])
                             count_changes[old_right] -= chunk_count
 
                         # Apply the merge
                         chunk_ids[ix] = idx
-                        chunk_ids.pop(ix+1)
+                        chunk_ids.pop(ix + 1)
 
                         # Add: (prev, C), (C, next)
                         if ix > 0:
-                            new_left = (chunk_ids[ix-1], chunk_ids[ix])
+                            new_left = (chunk_ids[ix - 1], chunk_ids[ix])
                             count_changes[new_left] += chunk_count
 
                         if ix + 1 < len(chunk_ids):
-                            new_right = (chunk_ids[ix], chunk_ids[ix+1])
+                            new_right = (chunk_ids[ix], chunk_ids[ix + 1])
                             count_changes[new_right] += chunk_count
                     else:
                         ix += 1
@@ -294,16 +309,19 @@ class FastRegexTokenizer:
             # Apply incremental changes to stats and positions
             for changed_pair, delta in count_changes.items():
                 if changed_pair == pair:
-                    # The merged pair should disappear completely
+                    # The merged will disappear completely (below)
                     continue
 
                 stats[changed_pair] += delta
 
                 # Update positions for changed pairs - only check affected chunks
                 for chunk_idx in affected_chunks:
+                    # chunk_ids is already modified at this point
                     chunk_ids = ids[chunk_idx]
-                    contains_pair = any((chunk_ids[j], chunk_ids[j+1]) == changed_pair
-                                      for j in range(len(chunk_ids) - 1))
+                    contains_pair = any(
+                        (chunk_ids[j], chunk_ids[j + 1]) == changed_pair
+                        for j in range(len(chunk_ids) - 1)
+                    )
                     if contains_pair:
                         positions[changed_pair].add(chunk_idx)
                     else:
@@ -317,19 +335,24 @@ class FastRegexTokenizer:
             merges[pair] = idx
             vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
 
+            # prints
+            if verbose:
+                print(
+                    f"merge {i + 1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences"
+                )
         # save class variables
-        self.merges = merges # used in encode()
-        self.vocab = vocab   # used in decode()
+        self.merges = merges  # used in encode()
+        self.vocab = vocab  # used in decode()
 
-    def register_special_tokens(self, special_tokens):
+    def register_special_tokens(self, special_tokens: dict[str, int]):
         # special_tokens is a dictionary of str -> int
         # example: {"<|endoftext|>": 100257}
         self.special_tokens = special_tokens
         self.inverse_special_tokens = {v: k for k, v in special_tokens.items()}
 
-    def decode(self, ids):
+    def decode(self, ids: list[int]) -> str:
         # given ids (list of integers), return Python string
-        part_bytes = []
+        part_bytes: list[bytes] = []
         for idx in ids:
             if idx in self.vocab:
                 part_bytes.append(self.vocab[idx])
@@ -341,11 +364,11 @@ class FastRegexTokenizer:
         text = text_bytes.decode("utf-8", errors="replace")
         return text
 
-    def _encode_chunk(self, text_bytes):
+    def _encode_chunk(self, text_bytes: bytes) -> list[int]:
         # return the token ids
         # let's begin. first, convert all bytes to integers in range 0..255
         ids = list(text_bytes)
-        while len(ids) >= 2:
+        while len(ids) > 1:
             # find the pair with the lowest merge index
             stats = get_stats(ids)
             pair = min(stats, key=lambda p: self.merges.get(p, float("inf")))
@@ -354,76 +377,81 @@ class FastRegexTokenizer:
             # just the first pair in the list, arbitrarily
             # we can detect this terminating case by a membership check
             if pair not in self.merges:
-                break # nothing else can be merged anymore
+                break  # nothing else can be merged anymore
             # otherwise let's merge the best pair (lowest merge index)
             idx = self.merges[pair]
-            ids = fast_merge_inplace(ids, pair, idx)
+            fast_merge_inplace(ids, pair, idx)
         return ids
 
-    def encode_ordinary(self, text):
+    def encode_ordinary(self, text: str) -> list[int]:
         """Encoding that ignores any special tokens."""
         # split text into chunks of text by categories defined in regex pattern
         text_chunks = re.findall(self.compiled_pattern, text)
         # all chunks of text are encoded separately, then results are joined
-        ids = []
+        ids: list[int] = []
         for chunk in text_chunks:
-            chunk_bytes = chunk.encode("utf-8") # raw bytes
+            chunk_bytes = chunk.encode("utf-8")  # raw bytes
             chunk_ids = self._encode_chunk(chunk_bytes)
             ids.extend(chunk_ids)
         return ids
 
+
 # -----------------------------------------------------------------------------
-# HuggingFace tokenizer
-from tokenizers import Tokenizer as HFTokenizer
-from tokenizers import pre_tokenizers, decoders, Regex
-from tokenizers.models import BPE
-from tokenizers.trainers import BpeTrainer
+
 
 class HuggingFaceTokenizer:
     """Light wrapper around HuggingFace Tokenizer for some utilities"""
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer: HFTokenizer):
         self.tokenizer = tokenizer
 
     @classmethod
-    def train_from_iterator(cls, text_iterator, vocab_size):
+    def train_from_iterator(cls, text_iterator: Iterable[str], vocab_size: int):
         # train from an iterator of text
         # Configure the HuggingFace Tokenizer
-        tokenizer = HFTokenizer(BPE(
-            byte_fallback=True, # needed!
-            unk_token=None,
-            fuse_unk=False,
-        ))
+        tokenizer = HFTokenizer(
+            BPE(
+                byte_fallback=True,  # needed!
+                unk_token=None,
+                fuse_unk=False,
+            )
+        )
         # Normalizer: None
-        tokenizer.normalizer = None
+        tokenizer.normalizer = None  # type: ignore
         # Pre-tokenizer: GPT-4 style
-        gpt4_split_regex = Regex(GPT4_SPLIT_PATTERN) # huggingface demands that you wrap it in Regex!!
-        tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
-            pre_tokenizers.Split(pattern=gpt4_split_regex, behavior="isolated", invert=False),
-            pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
-        ])
+        gpt4_split_regex = Regex(
+            GPT4_SPLIT_PATTERN
+        )  # huggingface demands that you wrap it in Regex!!
+        tokenizer.pre_tokenizer = pre_tokenizers.Sequence(
+            [
+                pre_tokenizers.Split(pattern=gpt4_split_regex, behavior="isolated", invert=False),
+                pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
+            ]
+        )  # type: ignore
         # Decoder: ByteLevel (it pairs together with the ByteLevel pre-tokenizer)
-        tokenizer.decoder = decoders.ByteLevel()
+        tokenizer.decoder = decoders.ByteLevel()  # type: ignore
         # Post-processor: None
-        tokenizer.post_processor = None
+        tokenizer.post_processor = None  # type: ignore
         # Trainer: BPE
         trainer = BpeTrainer(
             vocab_size=vocab_size,
             show_progress=True,
-            min_frequency=0, # no minimum frequency
-            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
-            special_tokens=[], # no special tokens
+            min_frequency=0,  # no minimum frequency
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),  # type: ignore
+            special_tokens=[],  # no special tokens
         )
         # Kick off the training
         tokenizer.train_from_iterator(text_iterator, trainer)
         return cls(tokenizer)
 
-    def encode_ordinary(self, text):
+    def encode_ordinary(self, text: str) -> list[int]:
         ids = self.tokenizer.encode(text, add_special_tokens=False).ids
         return ids
 
+
 # -----------------------------------------------------------------------------
 # Test all of the above
+
 
 @pytest.fixture(scope="module")
 def enwik8_path():
@@ -431,6 +459,7 @@ def enwik8_path():
     import os
     import zipfile
     from nanochat.common import get_base_dir
+
     base_dir = get_base_dir()
     # download and unzip enwik8 to .cache directory
     enwik8_url = "https://mattmahoney.net/dc/enwik8.zip"
@@ -439,6 +468,7 @@ def enwik8_path():
     if not os.path.exists(enwik8_local_path):
         print(f"Downloading enwik8 to {enwik8_local_path_zip}")
         import requests
+
         response = requests.get(enwik8_url)
         with open(enwik8_local_path_zip, "wb") as f:
             f.write(response.content)
@@ -453,18 +483,23 @@ def enwik8_path():
 
 
 @pytest.fixture(scope="module")
-def enwik8_small(enwik8_path):
+def enwik8_small(enwik8_path: str) -> str:
     """Fixture providing 100KB of enwik8 for quick tests."""
     with open(enwik8_path, "r") as f:
         return f.read(100_000)
 
+
 @pytest.fixture(scope="module")
-def enwik8_large(enwik8_path):
+def enwik8_large(enwik8_path: str) -> str:
     """Fixture providing 10MB of enwik8 for performance tests."""
     with open(enwik8_path, "r") as f:
         return f.read(10**7)
 
-def time_function(func, *args, **kwargs):
+
+P = ParamSpec("P")
+
+
+def time_function[T](func: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> tuple[T, float]:  # type: ignore
     """Time a function call and return the result and elapsed time"""
     start_time = time.time()
     result = func(*args, **kwargs)
@@ -472,7 +507,8 @@ def time_function(func, *args, **kwargs):
     elapsed = end_time - start_time
     return result, elapsed
 
-def test_correctness(enwik8_small):
+
+def test_correctness(enwik8_small: str):
     """Test that all tokenizer implementations produce the same results."""
     text = enwik8_small
     encode_text = text
@@ -481,14 +517,20 @@ def test_correctness(enwik8_small):
     # Train slow reference
     print("\nTraining slow reference...")
     slow_reference_tokenizer = RegexTokenizer()
-    ambiguous_flag, slow_reference_train_time = time_function(slow_reference_tokenizer.train, text, vocab_size)
-    slow_reference_ids, slow_reference_encode_time = time_function(slow_reference_tokenizer.encode_ordinary, encode_text)
+    ambiguous_flag, slow_reference_train_time = time_function(
+        slow_reference_tokenizer.train, text, vocab_size
+    )
+    slow_reference_ids, slow_reference_encode_time = time_function(
+        slow_reference_tokenizer.encode_ordinary, encode_text
+    )
     print(f"Slow reference train time: {slow_reference_train_time:.4f}s")
     print(f"Slow reference encode time: {slow_reference_encode_time:.4f}s")
     print(slow_reference_ids[:20])
 
     if ambiguous_flag:
-        print("‼️ WARNING: merge order was detected to be ambiguous given current text and vocab size")
+        print(
+            "‼️ WARNING: merge order was detected to be ambiguous given current text and vocab size"
+        )
         print("The implementation could be correct but we might see different results below")
     else:
         print("✅ Merge order is NOT ambiguous")
@@ -497,7 +539,9 @@ def test_correctness(enwik8_small):
     print("\nTraining fast reference...")
     fast_reference_tokenizer = FastRegexTokenizer()
     _, fast_reference_train_time = time_function(fast_reference_tokenizer.train, text, vocab_size)
-    fast_reference_ids, fast_reference_encode_time = time_function(fast_reference_tokenizer.encode_ordinary, encode_text)
+    fast_reference_ids, fast_reference_encode_time = time_function(
+        fast_reference_tokenizer.encode_ordinary, encode_text
+    )
     print(f"Fast reference train time: {fast_reference_train_time:.4f}s")
     print(f"Fast reference encode time: {fast_reference_encode_time:.4f}s")
     print(fast_reference_ids[:20])
@@ -508,14 +552,16 @@ def test_correctness(enwik8_small):
 
     # Train HuggingFace
     print("\nTraining HuggingFace...")
-    hf_tokenizer, hf_train_time = time_function(HuggingFaceTokenizer.train_from_iterator, [text], vocab_size)
+    hf_tokenizer, hf_train_time = time_function(
+        HuggingFaceTokenizer.train_from_iterator, [text], vocab_size
+    )
     hf_ids, hf_encode_time = time_function(hf_tokenizer.encode_ordinary, encode_text)
     print(f"HuggingFace train time: {hf_train_time:.4f}s")
     print(f"HuggingFace encode time: {hf_encode_time:.4f}s")
     print(hf_ids[:20])
 
     # HuggingFace has a different byte order, so we need custom matching
-    def custom_match(ids1, ids2):
+    def custom_match(ids1: list[int], ids2: list[int]) -> bool:
         perm = {}
         for x, y in zip(ids1, ids2):
             if x < 256:
@@ -562,7 +608,7 @@ def test_correctness(enwik8_small):
 
 
 @pytest.mark.slow
-def test_training_performance(enwik8_large):
+def test_training_performance(enwik8_large: str):
     """Use a bigger dataset and compare the training speed of the optimized tokenizers (Python, Rust, HuggingFace)."""
     text = enwik8_large
     vocab_size = 2048
@@ -584,17 +630,18 @@ def test_training_performance(enwik8_large):
 
     # Train HuggingFace
     print("\nTraining HuggingFace...")
-    hf_tokenizer, hf_train_time = time_function(HuggingFaceTokenizer.train_from_iterator, [text], vocab_size)
+    _, hf_train_time = time_function(HuggingFaceTokenizer.train_from_iterator, [text], vocab_size)
     print(f"HuggingFace train time: {hf_train_time:.4f}s")
     assert hf_train_time > 0, "Training should take some time"
 
     # Print comparison
-    print(f"\n📊 Performance comparison:")
+    print("\n📊 Performance comparison:")
     print(f"   RustBPE: {rustbpe_train_time:.4f}s")
     print(f"   HuggingFace: {hf_train_time:.4f}s")
-    print(f"   Speedup: {hf_train_time/rustbpe_train_time:.2f}x")
+    print(f"   Speedup: {hf_train_time / rustbpe_train_time:.2f}x")
 
-def test_interface(enwik8_small):
+
+def test_interface(enwik8_small: str):
     """Test the RustBPETokenizer interface for training, encoding, decoding, and serialization."""
     import tempfile
     from nanochat.tokenizer import RustBPETokenizer
@@ -602,7 +649,9 @@ def test_interface(enwik8_small):
     # Simple train test
     vocab_size = 300
     tok = RustBPETokenizer.train_from_iterator([enwik8_small], vocab_size)
-    assert tok.get_vocab_size() == vocab_size, f"Expected vocab size {vocab_size}, got {tok.get_vocab_size()}"
+    assert tok.get_vocab_size() == vocab_size, (
+        f"Expected vocab size {vocab_size}, got {tok.get_vocab_size()}"
+    )
     print(f"✅ Trained tokenizer with vocab size {vocab_size}")
 
     # Encode/decode text
@@ -623,7 +672,9 @@ def test_interface(enwik8_small):
     # append/prepend functionality
     ids_special = tok.encode(encode_text, prepend="<|bos|>", append="<|bos|>")
     bos_token_id = tok.encode_special("<|bos|>")
-    assert ids_special == [bos_token_id] + ids + [bos_token_id], "Special tokens not correctly added"
+    assert ids_special == [bos_token_id] + ids + [bos_token_id], (
+        "Special tokens not correctly added"
+    )
     print("✅ append/prepend OK")
 
     # Save/load test through a temporary directory

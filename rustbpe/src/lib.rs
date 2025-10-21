@@ -62,17 +62,16 @@ impl Word {
         while i < n {
             if i + 1 < n && self.ids[i] == a && self.ids[i + 1] == b {
                 let left = out.last().copied();
-                let right = if i + 2 < n { Some(self.ids[i + 2]) } else { None };
-
+                let right = self.ids.get(i + 2).cloned();
                 // remove old pairs
-                if let Some(x) = left {
-                    deltas.push(((x, a), -1));
-                    deltas.push(((x, new_id), 1));
+                if let Some(left) = left {
+                    deltas.push(((left, a), -1));
+                    deltas.push(((left, new_id), 1));
                 }
                 deltas.push(((a, b), -1));
-                if let Some(y) = right {
-                    deltas.push(((b, y), -1));
-                    deltas.push(((new_id, y), 1));
+                if let Some(right) = right {
+                    deltas.push(((b, right), -1));
+                    deltas.push(((new_id, right), 1));
                 }
 
                 // write merged token
@@ -157,7 +156,6 @@ fn count_pairs_parallel(
 // ------------------------ END helpers ------------------------
 
 impl Tokenizer {
-
     /// Core incremental BPE training given unique words and their counts.
     /// `words`: one entry per unique chunk (Vec<u32> of token-ids/bytes).
     /// `counts`: same length as `words`, count per chunk.
@@ -168,7 +166,10 @@ impl Tokenizer {
         self.merges.clear();
 
         // ---- Initial pair_counts and where_to_update (parallel) ----
-        log::info!("Computing initial pair counts from {} unique sequences", words.len());
+        log::info!(
+            "Computing initial pair counts from {} unique sequences",
+            words.len()
+        );
         let (mut pair_counts, mut where_to_update) = count_pairs_parallel(&words, &counts);
 
         // ---- Build heap ----
@@ -191,7 +192,9 @@ impl Tokenizer {
         let mut last_log_percent = 0u32;
 
         while merges_done < num_merges {
-            let Some(mut top) = heap.pop() else { break; };
+            let Some(mut top) = heap.pop() else {
+                break;
+            };
 
             // Lazy refresh
             let current = *pair_counts.get(&top.pair).unwrap_or(&0);
@@ -217,7 +220,7 @@ impl Tokenizer {
                 let changes = words[word_idx].merge_pair(top.pair, new_id);
                 // Update global pair counts based on this word's count
                 for (pair, delta) in changes {
-                    let delta_total = delta * counts[word_idx];
+                    let delta_total = delta * counts[word_idx] as i32;
                     if delta_total != 0 {
                         *pair_counts.entry(pair).or_default() += delta_total;
                         if delta > 0 {
@@ -229,11 +232,11 @@ impl Tokenizer {
 
             // Add the updated pair counts back to the heap
             for (pair, pos) in local_pos_updates {
-                let cnt = *pair_counts.get(&pair).unwrap_or(&0);
-                if cnt > 0 {
+                let count = *pair_counts.get(&pair).unwrap_or(&0);
+                if count > 0 {
                     heap.push(MergeJob {
                         pair,
-                        count: cnt as u64,
+                        count: count as u64,
                         pos,
                     });
                 }
@@ -246,7 +249,12 @@ impl Tokenizer {
             if current_percent > last_log_percent {
                 log::info!(
                     "Progress: {}% ({}/{} merges) - Last merge: {:?} -> {} (frequency: {})",
-                    current_percent, merges_done, num_merges, top.pair, new_id, top.count
+                    current_percent,
+                    merges_done,
+                    num_merges,
+                    top.pair,
+                    new_id,
+                    top.count
                 );
                 last_log_percent = current_percent;
             }
@@ -273,7 +281,9 @@ impl Tokenizer {
     /// We refill a Rust Vec<String> buffer under the GIL, then release the GIL
     /// to do the heavy splitting and counting **in parallel** with rayon.
     #[pyo3(signature = (iterator, vocab_size, buffer_size=8192, pattern=None))]
-    #[pyo3(text_signature = "(self, iterator, vocab_size, buffer_size=8192, pattern=None)")]
+    #[pyo3(
+        text_signature = "(self, iterator: Iterable[str], vocab_size: int, buffer_size: int=8192, pattern: str | None=None)"
+    )]
     pub fn train_from_iterator(
         &mut self,
         py: pyo3::Python<'_>,
@@ -287,13 +297,17 @@ impl Tokenizer {
 
         // Update the stored pattern and compile it
         self.pattern = pattern_str.clone();
-        self.compiled_pattern = Regex::new(&pattern_str)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid regex pattern: {}", e)))?;
+        self.compiled_pattern = Regex::new(&pattern_str).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid regex pattern: {}", e))
+        })?;
 
         // Prepare a true Python iterator object
         let py_iter: pyo3::Py<pyo3::PyAny> = unsafe {
-            pyo3::Bound::from_borrowed_ptr_or_err(py, pyo3::ffi::PyObject_GetIter(iterator.as_ptr()))?
-                .into()
+            pyo3::Bound::from_borrowed_ptr_or_err(
+                py,
+                pyo3::ffi::PyObject_GetIter(iterator.as_ptr()),
+            )?
+            .into()
         };
 
         // Global chunk counts
@@ -302,13 +316,16 @@ impl Tokenizer {
         // Temporary buffer we refill under the GIL
         let mut buf: Vec<String> = Vec::with_capacity(buffer_size);
 
-        log::info!("Processing sequences from iterator (buffer_size: {})", buffer_size);
+        log::info!(
+            "Processing sequences from iterator (buffer_size: {})",
+            buffer_size
+        );
         let mut total_sequences = 0u64;
 
         // Helper: refill `buf` with up to `buffer_size` strings from the Python iterator.
         // Returns Ok(true) if the iterator is exhausted, Ok(false) otherwise.
         let refill = |buf: &mut Vec<String>| -> PyResult<bool> {
-            pyo3::Python::with_gil(|py| {
+            pyo3::Python::attach(|py| {
                 buf.clear();
                 let it = py_iter.bind(py);
                 loop {
@@ -346,7 +363,7 @@ impl Tokenizer {
             total_sequences += buf.len() as u64;
 
             let pattern = self.compiled_pattern.clone();
-            let local: AHashMap<CompactString, i32> = py.allow_threads(|| {
+            let local: AHashMap<CompactString, i32> = py.detach(|| {
                 buf.par_iter()
                     .map(|s| {
                         let mut m: AHashMap<CompactString, i32> = AHashMap::new();
@@ -376,13 +393,19 @@ impl Tokenizer {
                 break;
             }
         }
-        log::info!("Processed {} sequences total, {} unique", total_sequences, counts.len());
+        log::info!(
+            "Processed {} sequences total, {} unique",
+            total_sequences,
+            counts.len()
+        );
 
         // Materialize words & counts
         let mut words = Vec::with_capacity(counts.len());
         let mut cvec = Vec::with_capacity(counts.len());
         for (chunk, c) in counts.into_iter() {
-            words.push(Word::new(chunk.as_bytes().iter().map(|&b| b as u32).collect()));
+            words.push(Word::new(
+                chunk.as_bytes().iter().map(|&b| b as u32).collect(),
+            ));
             cvec.push(c);
         }
 
@@ -438,7 +461,7 @@ impl Tokenizer {
             let mut ids: Vec<u32> = chunk.bytes().map(|b| b as u32).collect();
 
             // Apply merges iteratively
-            while ids.len() >= 2 {
+            while ids.len() > 1 {
                 // Find the best pair to merge
                 let mut best_pair: Option<(usize, Pair, u32)> = None;
 
