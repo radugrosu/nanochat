@@ -1,27 +1,38 @@
 """
 Utilities for saving and loading model/optim/state checkpoints.
 """
+
 import os
+from pathlib import Path
 import re
-import glob
 import json
 import logging
+from typing import Any, Literal
 import torch
 
-from nanochat.common import get_base_dir
+from nanochat.common import FilePath, get_base_dir
 from nanochat.gpt import GPT, GPTConfig
-from nanochat.tokenizer import get_tokenizer
+from nanochat.tokenizer import RustBPETokenizer, get_tokenizer
 from nanochat.common import setup_default_logging
 
 # Set up logging
 setup_default_logging()
 logger = logging.getLogger(__name__)
-def log0(message):
-    if int(os.environ.get('RANK', 0)) == 0:
+
+
+def log0(message: str):
+    if int(os.environ.get("RANK", 0)) == 0:
         logger.info(message)
 
-def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data):
-    assert int(os.environ.get('RANK', 0)) == 0 # prevent footguns for now
+
+def save_checkpoint(
+    checkpoint_dir: FilePath,
+    step: int,
+    model_data: dict[str, Any],
+    optimizer_data: dict[str, Any] | None,
+    meta_data: dict[str, Any],
+):
+    assert int(os.environ.get("RANK", 0)) == 0  # prevent footguns for now
     os.makedirs(checkpoint_dir, exist_ok=True)
     # Save the model state (parameters)
     model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
@@ -39,7 +50,12 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data)
     log0(f"Saved metadata file to: {meta_path}")
 
 
-def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False):
+def load_checkpoint(
+    checkpoint_dir: FilePath,
+    step: int,
+    device: torch.device | str,
+    load_optimizer: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
     # Load the model state
     model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
     model_data = torch.load(model_path, map_location=device)
@@ -55,7 +71,12 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False):
     return model_data, optimizer_data, meta_data
 
 
-def build_model(checkpoint_dir, step, device, phase):
+def build_model(
+    checkpoint_dir: FilePath,
+    step: int,
+    device: torch.device | str,
+    phase: Literal["train", "eval"],
+) -> tuple[GPT, RustBPETokenizer, dict[str, Any]]:
     """
     A bunch of repetitive code to build a model from a given checkpoint.
     Returns:
@@ -64,7 +85,7 @@ def build_model(checkpoint_dir, step, device, phase):
     - meta data saved during base model training
     """
     assert phase in ["train", "eval"], f"Invalid phase: {phase}"
-    model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
+    model_data, _, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
     # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
     model_data = {k.lstrip("_orig_mod."): v for k, v in model_data.items()}
     model_config_kwargs = meta_data["model_config"]
@@ -74,7 +95,7 @@ def build_model(checkpoint_dir, step, device, phase):
         model = GPT(model_config)
     # Load the model state
     model.to_empty(device=device)
-    model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
+    model.init_weights()  # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
     model.load_state_dict(model_data, strict=True, assign=True)
     # Put the model in the right training phase / mode
     if phase == "eval":
@@ -88,43 +109,51 @@ def build_model(checkpoint_dir, step, device, phase):
     return model, tokenizer, meta_data
 
 
-def find_largest_model(checkpoint_dir):
+def find_largest_model(checkpoint_dir: FilePath) -> str:
     # attempt to guess the model tag: take the biggest model available
-    model_tags = [f for f in os.listdir(checkpoint_dir) if os.path.isdir(os.path.join(checkpoint_dir, f))]
+    model_tags = [f for f in Path(checkpoint_dir).iterdir() if f.is_dir()]
     if not model_tags:
         raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
     # 1) normally all model tags are of the form d<number>, try that first:
-    candidates = []
+    candidates: list[tuple[int, Path]] = []
     for model_tag in model_tags:
-        match = re.match(r"d(\d+)", model_tag)
+        match = re.match(r"d(\d+)", model_tag.stem)
         if match:
             model_depth = int(match.group(1))
             candidates.append((model_depth, model_tag))
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
-        return candidates[0][1]
-    # 2) if that failed, take the most recently updated model:
-    model_tags.sort(key=lambda x: os.path.getmtime(os.path.join(checkpoint_dir, x)), reverse=True)
-    return model_tags[0]
+        candidate = candidates[0][1]
+    else:
+        # 2) if that failed, take the most recently updated model:
+        candidate = max(model_tags, key=lambda x: x.stat().st_mtime)
+    return candidate.name
 
 
-def find_last_step(checkpoint_dir):
+def find_last_step(checkpoint_dir: FilePath) -> int:
     # Look into checkpoint_dir and find model_<step>.pt with the highest step
-    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "model_*.pt"))
+    checkpoint_files = [*Path(checkpoint_dir).glob("model_*.pt")]
     if not checkpoint_files:
         raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
-    last_step = int(max(os.path.basename(f).split("_")[-1].split(".")[0] for f in checkpoint_files))
-    return last_step
+    return max(int(f.stem.rsplit("_")[0]) for f in checkpoint_files)
+
 
 # -----------------------------------------------------------------------------
 # convenience functions that take into account nanochat's directory structure
 
-def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=None):
+
+def load_model_from_dir(
+    checkpoints_dir: FilePath,
+    device: torch.device | str,
+    phase: Literal["train", "eval"],
+    model_tag: str | None = None,
+    step: int | None = None,
+):
     if model_tag is None:
         # guess the model tag by defaulting to the largest model
         model_tag = find_largest_model(checkpoints_dir)
         log0(f"No model tag provided, guessing model tag: {model_tag}")
-    checkpoint_dir = os.path.join(checkpoints_dir, model_tag)
+    checkpoint_dir = Path(checkpoints_dir, model_tag)
     if step is None:
         # guess the step by defaulting to the last step
         step = find_last_step(checkpoint_dir)
@@ -134,7 +163,10 @@ def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=Non
     model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
     return model, tokenizer, meta_data
 
-def load_model(source, *args, **kwargs):
+
+def load_model(
+    source: str, *args: Any, **kwargs: Any
+) -> tuple[GPT, RustBPETokenizer, dict[str, Any]]:
     model_dir = {
         "base": "base_checkpoints",
         "mid": "mid_checkpoints",
