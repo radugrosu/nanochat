@@ -1,6 +1,8 @@
 #!/bin/bash
 
 # WANDB_RUN=testrun screen -L -Logfile testrun.log -S testrun bash testrun.sh
+export _TYPER_STANDARD_TRACEBACK=1
+unset $CONDA_PREFIX
 if [ -z "$WANDB_API_KEY" ]; then
     if [ -f ".env" ]; then
             echo "Sourcing .env file..."
@@ -75,15 +77,6 @@ python -m scripts.tok_eval
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
-
-# Download the eval_bundle from s3 to evaluate CORE metric during training (~162MB)
-EVAL_BUNDLE_URL=https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip
-if [ ! -d "$NANOCHAT_BASE_DIR/eval_bundle" ]; then
-    curl -L -o eval_bundle.zip $EVAL_BUNDLE_URL
-    unzip -q eval_bundle.zip
-    rm eval_bundle.zip
-    mv eval_bundle $NANOCHAT_BASE_DIR
-fi
 
 # The d20 model is 561M parameters. d2 should be around ~60M
 # Chinchilla says #tokens = 20X #params, so we need 561e6 * 2 = 1.1B tokens.

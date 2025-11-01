@@ -7,15 +7,13 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import torch
 
 from nanochat.common import FilePath, get_base_dir, setup_default_logging
+from nanochat.gpt import GPT, GPTConfig
 from nanochat.tokenizer import RustBPETokenizer, get_tokenizer
-
-if TYPE_CHECKING:
-    from nanochat.gpt import GPT, GPTConfig
 
 # Set up logging
 setup_default_logging()
@@ -36,7 +34,7 @@ def save_checkpoint(
 ):
     assert int(os.environ.get("RANK", 0)) == 0  # prevent footguns for now
     checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(exist_ok=True)
+    checkpoint_dir.mkdir(exist_ok=True, parents=True)
     # Save the model state (parameters)
     model_path = checkpoint_dir / f"model_{step:06d}.pt"
     torch.save(model_data, model_path)
@@ -48,7 +46,7 @@ def save_checkpoint(
         log0(f"Saved optimizer file to: {optimizer_path}")
     # Save the metadata dict as json
     meta_path = checkpoint_dir / f"meta_{step:06d}.json"
-    with open(meta_path, "w") as f:
+    with open(meta_path, "w", encoding='utf-8') as f:
         json.dump(meta_data, f, indent=2)
     log0(f"Saved metadata file to: {meta_path}")
 
@@ -70,7 +68,7 @@ def load_checkpoint(
         optimizer_data = torch.load(optimizer_path, map_location=device)
     # Load the metadata
     meta_path = checkpoint_dir / f"meta_{step:06d}.json"
-    with open(meta_path, "r") as f:
+    with open(meta_path, "r", encoding='utf-8') as f:
         meta_data = json.load(f)
     return model_data, optimizer_data, meta_data
 
@@ -88,12 +86,19 @@ def build_model(
     - tokenizer
     - meta data saved during base model training
     """
+
     assert phase in ["train", "eval"], f"Invalid phase: {phase}"
     model_data, _, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
+    if str(device) in ["cpu", "mps"]:
+        # Convert bfloat16 tensors to float for CPU inference
+        model_data = {
+            k: v.float() if v.dtype == torch.bfloat16 else v for k, v in model_data.items()
+        }
     # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
-    model_data = {k.lstrip("_orig_mod."): v for k, v in model_data.items()}
+    model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
     model_config_kwargs = meta_data["model_config"]
     log0(f"Building model with config: {model_config_kwargs}")
+
     model_config = GPTConfig(**model_config_kwargs)
     with torch.device("meta"):
         model = GPT(model_config)
@@ -139,7 +144,7 @@ def find_last_step(checkpoint_dir: FilePath) -> int:
     checkpoint_files = [*Path(checkpoint_dir).glob("model_*.pt")]
     if not checkpoint_files:
         raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
-    return max(int(f.stem.rsplit("_")[0]) for f in checkpoint_files)
+    return max(int(f.stem.rsplit("_")[-1]) for f in checkpoint_files)
 
 
 # -----------------------------------------------------------------------------

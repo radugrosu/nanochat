@@ -18,19 +18,21 @@ python -m pytest tests/test_rustbpe.py -v -s
 -v is verbose, -s is show prints
 """
 
-from typing import Callable, Iterable, ParamSpec
-import regex as re
-from collections import Counter, defaultdict
 import time
-import rustbpe
-import tiktoken
+from collections import Counter, defaultdict
+from typing import Callable, Iterable, ParamSpec
+
 import pytest
+import regex as re
+import tiktoken
+from tokenizers import Regex, decoders, pre_tokenizers
 
 # HuggingFace tokenizer
 from tokenizers import Tokenizer as HFTokenizer
-from tokenizers import pre_tokenizers, decoders, Regex
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
+
+import rustbpe
 
 GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
 
@@ -458,6 +460,7 @@ def enwik8_path():
     """Fixture to download and cache enwik8 dataset."""
     import os
     import zipfile
+
     from nanochat.common import get_base_dir
 
     base_dir = get_base_dir()
@@ -470,7 +473,7 @@ def enwik8_path():
         import requests
 
         response = requests.get(enwik8_url)
-        with open(enwik8_local_path_zip, "wb") as f:
+        with open(enwik8_local_path_zip, "wb", encoding="utf-8") as f:
             f.write(response.content)
         with zipfile.ZipFile(enwik8_local_path_zip, "r") as zip_ref:
             zip_ref.extractall(base_dir)
@@ -485,7 +488,7 @@ def enwik8_path():
 @pytest.fixture(scope="module")
 def enwik8_small(enwik8_path: str) -> str:
     """Fixture providing 100KB of enwik8 for quick tests."""
-    with open(enwik8_path, "r") as f:
+    with open(enwik8_path, "r", encoding="utf-8") as f:
         return f.read(100_000)
 
 
@@ -644,6 +647,7 @@ def test_training_performance(enwik8_large: str):
 def test_interface(enwik8_small: str):
     """Test the RustBPETokenizer interface for training, encoding, decoding, and serialization."""
     import tempfile
+
     from nanochat.tokenizer import RustBPETokenizer
 
     # Simple train test

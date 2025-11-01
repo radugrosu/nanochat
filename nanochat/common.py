@@ -2,7 +2,6 @@
 Common utilities for nanochat.
 """
 
-import fcntl
 import logging
 import os
 import re
@@ -12,6 +11,7 @@ from typing import Any, Literal, TypeAlias
 
 import torch
 import torch.distributed as dist
+from filelock import FileLock
 
 FilePath: TypeAlias = os.PathLike[str] | str
 
@@ -59,39 +59,31 @@ setup_default_logging()
 logger = logging.getLogger(__name__)
 
 
-def download_file_with_lock(url: str, filename: str) -> str:
+def download_file_with_lock(url: str, filename: str) -> Path:
     """Downloads a file from a URL to a local path in the base directory.
     Uses a lock file to prevent concurrent downloads among multiple ranks.
     """
     base_dir = get_base_dir()
-    file_path = os.path.join(base_dir, filename)
-    lock_path = file_path + ".lock"
+    file_path = base_dir / filename
 
-    if os.path.exists(file_path):
+    if file_path.exists():
         return file_path
 
-    with open(lock_path, "w") as lock_file:
+    lock_path = file_path.with_suffix(".lock")
+    with FileLock(lock_path):
         # Only a single rank can acquire this lock
         # All other ranks block until it is released
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-
-        if os.path.exists(file_path):
+        if file_path.exists():  # recheck
             return file_path
 
         print(f"Downloading {url}...")
         with urllib.request.urlopen(url) as response:
-            content = response.read().decode("utf-8")
+            content = response.read()
 
-        with open(file_path, "w") as f:
+        with open(file_path, "wb") as f:
             f.write(content)
 
         print(f"Downloaded to {file_path}")
-
-    # Clean up the lock file after the lock is released
-    try:
-        os.remove(lock_path)
-    except OSError:
-        pass  # Ignore if already removed by another process
 
     return file_path
 

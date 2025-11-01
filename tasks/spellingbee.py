@@ -122,7 +122,7 @@ class SpellingBee(Task):
         self.split = split
         filename = WORD_LIST_URL.split("/")[-1]
         word_list_path = download_file_with_lock(WORD_LIST_URL, filename)
-        with open(word_list_path) as f:
+        with open(word_list_path, encoding="utf-8") as f:
             words = [line.strip() for line in f]
         self.words = words
 
@@ -247,7 +247,7 @@ class SimpleSpelling(Task):
         self.split = split
         filename = WORD_LIST_URL.split("/")[-1]
         word_list_path = download_file_with_lock(WORD_LIST_URL, filename)
-        with open(word_list_path) as f:
+        with open(word_list_path, encoding="utf-8") as f:
             words = [line.strip() for line in f]
         rng = random.Random(42)
         rng.shuffle(words)  # use a different word order than the SpellingBee task

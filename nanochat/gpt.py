@@ -22,7 +22,7 @@ import torch.nn.functional as F
 
 from nanochat.adamw import DistAdamW
 from nanochat.common import get_dist_info
-from nanochat.engine import KVCache
+from nanochat.kvcache import KVCache
 from nanochat.muon import DistMuon, Muon
 
 
@@ -196,8 +196,6 @@ class GPT(nn.Module):
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.cos = nn.Buffer(cos, persistent=False)  # not saved to the checkpoint
         self.sin = nn.Buffer(sin, persistent=False)
-        # Cast the embeddings from fp32 to bf16: optim can tolerate it and it saves memory: both in the model and the activations
-        self.wte.to(dtype=torch.bfloat16)
 
     @property
     def h(self) -> ModuleSequence:
@@ -222,6 +220,8 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(block.attn.c_proj.weight)
         # init the rotary embeddings
         self.init_buffers()
+        if self.wte.weight.device.type == "cuda":
+            self.wte.to(dtype=torch.bfloat16)
 
     def _init_weights(self, module: nn.Module):
         if isinstance(module, nn.Linear):

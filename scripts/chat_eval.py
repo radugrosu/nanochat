@@ -1,19 +1,10 @@
-"""
-Evaluate the Chat model.
-All the generic code lives here, and all the evaluation-specific
-code lives in nanochat directory and is imported from here.
-
-Example runs:
-python -m scripts.chat_eval -a ARC-Easy
-torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
-"""
-
-import argparse
 from contextlib import nullcontext
 from functools import partial
+from typing import Annotated, Literal
 
 import torch
 import torch.distributed as dist
+import typer
 
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import (
@@ -26,6 +17,7 @@ from nanochat.common import (
 from nanochat.engine import Engine
 from nanochat.gpt import GPT
 from nanochat.tokenizer import RustBPETokenizer
+from scripts.common import config_from_context
 from tasks.arc import ARC
 from tasks.common import Task
 from tasks.gsm8k import GSM8K
@@ -239,45 +231,52 @@ def run_chat_eval(
 
 
 # -----------------------------------------------------------------------------
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-i", "--source", type=str, required=True, help="Source of the model: sft|mid|rl"
-    )
-    parser.add_argument(
-        "-a",
-        "--task-name",
-        type=str,
-        default=None,
-        help="Task name. Default = all tasks. Use | to split multiple tasks.",
-    )
-    parser.add_argument(
-        "-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"]
-    )
-    parser.add_argument("-t", "--temperature", type=float, default=0.0)
-    parser.add_argument("-m", "--max-new-tokens", type=int, default=512)
-    parser.add_argument("-n", "--num-samples", type=int, default=1)
-    parser.add_argument("-k", "--top-k", type=int, default=50)
-    parser.add_argument(
-        "-b", "--batch-size", type=int, default=8, help="Batch size for categorical evaluation"
-    )
-    parser.add_argument("-g", "--model-tag", type=str, default=None, help="Model tag to load")
-    parser.add_argument("-s", "--step", type=int, default=None, help="Step to load")
-    parser.add_argument(
-        "-x", "--max-problems", type=int, default=None, help="Max problems to evaluate"
-    )
-    parser.add_argument(
-        "--device-type",
-        type=str,
-        default="",
-        choices=["cuda", "cpu", "mps"],
-        help="Device type for evaluation: cuda|cpu|mps. empty => autodetect",
-    )
-    args = parser.parse_args()
+def main(
+    ctx: typer.Context,
+    source: Annotated[str, typer.Option("-i", "--source", help="Source of the model: sft|mid|rl")],
+    task_name: Annotated[
+        str | None,
+        typer.Option(
+            "-a",
+            "--task-name",
+            help="Task name. Default = all tasks. Use | to split multiple tasks.",
+        ),
+    ] = None,
+    dtype: Annotated[Literal["float32", "bfloat16"], typer.Option("-d", "--dtype")] = "bfloat16",
+    temperature: Annotated[float, typer.Option("-t", "--temperature")] = 0.0,
+    max_new_tokens: Annotated[int, typer.Option("-m", "--max-new-tokens")] = 512,
+    num_samples: Annotated[int, typer.Option("-n", "--num-samples")] = 1,
+    top_k: Annotated[int, typer.Option("-k", "--top-k")] = 50,
+    batch_size: Annotated[
+        int, typer.Option("-b", "--batch-size", help="Batch size for categorical evaluation")
+    ] = 8,
+    model_tag: Annotated[
+        str | None, typer.Option("-g", "--model-tag", help="Model tag to load")
+    ] = None,
+    step: Annotated[int | None, typer.Option("-s", "--step", help="Step to load")] = None,
+    max_problems: Annotated[
+        int | None, typer.Option("-x", "--max-problems", help="Max problems to evaluate")
+    ] = None,
+    device_type: Annotated[
+        Literal["cuda", "cpu", "mps", ""],
+        typer.Option(
+            "--device-type", help="Device type for evaluation: cuda|cpu|mps. empty => autodetect"
+        ),
+    ] = "",
+):
+    """Evaluate the Chat model.
 
-    device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-    ptdtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
+    All the generic code lives here, and all the evaluation-specific
+    code lives in nanochat directory and is imported from here.
+
+    Example runs:
+        python -m scripts.chat_eval -a ARC-Easy
+        torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
+    """
+
+    device_type = autodetect_device_type() if device_type == "" else device_type
+    *_, device = compute_init(device_type)
+    ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
     autocast_ctx = (
         torch.autocast(device_type=device_type, dtype=ptdtype)
         if device_type == "cuda"
@@ -285,7 +284,7 @@ if __name__ == "__main__":
     )
 
     model, tokenizer, meta = load_model(
-        args.source, device, phase="eval", model_tag=args.model_tag, step=args.step
+        source, device, phase="eval", model_tag=model_tag, step=step
     )
     engine = Engine(model, tokenizer)
 
@@ -298,10 +297,10 @@ if __name__ == "__main__":
         "GSM8K": 0.0,  # open-ended => 0%
         "HumanEval": 0.0,  # open-ended => 0%
     }
-    task_names = all_tasks if args.task_name is None else args.task_name.split("|")
+    task_names = all_tasks if task_name is None else task_name.split("|")
 
     # Run all the task evaluations sequentially
-    results = {}
+    results: dict[str, float] = {}
     for task_name in task_names:
         with autocast_ctx:
             acc = run_chat_eval(
@@ -309,12 +308,12 @@ if __name__ == "__main__":
                 model,
                 tokenizer,
                 engine,
-                batch_size=args.batch_size,
-                num_samples=args.num_samples,
-                max_new_tokens=args.max_new_tokens,
-                temperature=args.temperature,
-                top_k=args.top_k,
-                max_problems=args.max_problems,
+                batch_size=batch_size,
+                num_samples=num_samples,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                max_problems=max_problems,
             )
             results[task_name] = acc
             print0(f"{task_name} accuracy: {100 * acc:.2f}%")
@@ -334,13 +333,19 @@ if __name__ == "__main__":
             centered_mean += centered_acc
         chatcore_metric = centered_mean / len(results)
         chatcore_metric_dict = {"ChatCORE metric": chatcore_metric}
+
+    user_config, _ = config_from_context(ctx)
     get_report().log(
-        section="Chat evaluation " + args.source,
+        section=f"Chat evaluation {source}",
         data=[
-            vars(args),  # CLI args
+            user_config,
             results,
             chatcore_metric_dict,
         ],
     )
 
     compute_cleanup()
+
+
+if __name__ == "__main__":
+    typer.run(main)

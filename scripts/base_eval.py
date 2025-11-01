@@ -1,25 +1,18 @@
-"""
-Evlauate the CORE metric for a given model.
-
-Run on a single GPU:
-python base_eval.py
-
-Run with torchrun on e.g. 8 GPUs:
-torchrun --nproc_per_node=8 base_eval.py
-
-The script will print the CORE metric to the console.
-"""
-
 from __future__ import annotations
 
 import csv
 import json
 import random
+import shutil
+import tempfile
 import time
+import zipfile
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any
 
 import torch
+import typer
 import yaml
 
 from nanochat.checkpoint_manager import load_model
@@ -28,10 +21,12 @@ from nanochat.common import (
     autodetect_device_type,
     compute_cleanup,
     compute_init,
+    download_file_with_lock,
     get_base_dir,
     print0,
 )
 from nanochat.core_eval import evaluate_task
+from nanochat.report import get_report
 from nanochat.tokenizer import HuggingFaceTokenizer
 
 if TYPE_CHECKING:
@@ -72,7 +67,7 @@ def load_hf_model(hf_path: str, device):
 
 def read_eval_metadata(path: FilePath) -> dict[str, float]:
     eval_metadata: dict[str, float] = {}
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
         header = next(reader)  # Skip header
         idx = header.index("Random baseline")
@@ -85,6 +80,21 @@ def read_eval_metadata(path: FilePath) -> dict[str, float]:
 
 # -----------------------------------------------------------------------------
 # nanoChat specific function dealing with I/O etc.
+# ~162MB of data needed to evaluate the CORE metric
+EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
+
+
+def place_eval_bundle(file_path: str | Path):
+    # here file_path is the path to the eval_bundle.zip file
+    # we need to unzip it and place it in the base directory
+    base_dir = get_base_dir()
+    eval_bundle_dir = base_dir / "eval_bundle"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with zipfile.ZipFile(file_path, "r") as zip_ref:
+            zip_ref.extractall(tmpdir)
+        extracted_bundle_dir = Path(tmpdir, "eval_bundle")
+        shutil.move(extracted_bundle_dir, eval_bundle_dir)
+    print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
 
 
 def evaluate_model(
@@ -101,10 +111,17 @@ def evaluate_model(
     # Load config and task metadata
     base_dir = get_base_dir()
     eval_bundle_dir = base_dir / "eval_bundle"
+    # Download the eval bundle to disk (and unzip if needed)
+    if not eval_bundle_dir.exists():
+        download_path = download_file_with_lock(
+            EVAL_BUNDLE_URL,
+            "eval_bundle.zip",
+        )
+        place_eval_bundle(download_path)
     config_path = eval_bundle_dir / "core.yaml"
     data_base_path = eval_bundle_dir / "eval_data"
     eval_meta_data_path = eval_bundle_dir / "eval_meta_data.csv"
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     tasks = config["icl_tasks"]
     eval_metadata = read_eval_metadata(eval_meta_data_path)
@@ -127,7 +144,7 @@ def evaluate_model(
 
         # Load data for this task
         data_path = data_base_path / task["dataset_uri"]
-        with open(data_path, "r") as f:
+        with open(data_path, "r", encoding='utf-8') as f:
             data: list[dict[str, str]] = [json.loads(line.strip()) for line in f]
 
         # shuffle the data because in many cases it appears ordered but we want
@@ -155,21 +172,22 @@ def evaluate_model(
 
 
 # -----------------------------------------------------------------------------
-def main():
-    import argparse
+def main(
+    hf_path: Annotated[str | None, typer.Option(help="HF model path to evaluate")] = None,
+    max_per_task: Annotated[
+        int, typer.Option(help="Max. num. of examples per task to eval (-1 = disable)")
+    ] = -1,
+):
+    """Evaluate the CORE metric for a given model.
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--hf-path", type=str, default=None, help="HuggingFace model path to evaluate"
-    )
-    parser.add_argument(
-        "--max-per-task",
-        type=int,
-        default=-1,
-        help="Max examples per task to evaluate (-1 = disable)",
-    )
-    args = parser.parse_args()
+    Run on a single GPU:
+    python -m scripts.base_eval
 
+    Run with torchrun on e.g. 8 GPUs:
+    torchrun --nproc_per_node=8 -m scripts.base_eval.py
+
+    The script will print the CORE metric to the console.
+    """
     # distributed / precision setup
     device_type = autodetect_device_type()
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
@@ -180,9 +198,8 @@ def main():
     )
 
     # Load model and tokenizer from command line or from file system
-    if args.hf_path is not None:
+    if hf_path is not None:
         # atm assume that if a path is given, it's a huggingface model path
-        hf_path = args.hf_path
         print0(f"Loading huggingface model from: {hf_path}")
         model, tokenizer = load_hf_model(hf_path, device)
         model_name = hf_path  # just for logging
@@ -199,7 +216,7 @@ def main():
             model,  # type: ignore
             tokenizer,  # type: ignore
             device,
-            max_per_task=args.max_per_task,
+            max_per_task=max_per_task,
         )
 
     # Write out the results to a csv file
@@ -212,7 +229,7 @@ def main():
         results = out["results"]
         centered_results = out["centered_results"]
         core_metric = out["core_metric"]
-        with open(output_csv_path, "w") as f:
+        with open(output_csv_path, "w", encoding='utf-8', newline="") as f:
             f.write(f"{'Task':<35}, {'Accuracy':<10}, {'Centered':<10}\n")
             for label in results:
                 f.write(f"{label:<35}, {results[label]:<10.6f}, {centered_results[label]:<10.6f}\n")
@@ -223,9 +240,6 @@ def main():
         print0("=" * 80)
         with open(output_csv_path, "r") as f:
             print0(f.read())
-
-    # Log to report
-    from nanochat.report import get_report
 
     get_report().log(
         section="Base model evaluation",
@@ -242,4 +256,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)

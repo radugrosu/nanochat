@@ -3,6 +3,9 @@
 # A bit sparser on comments, see speedrun.sh for more detail
 
 # all the setup stuff
+set -e
+unset CONDA_PREFIX
+export _TYPER_STANDARD_TRACEBACK=1
 export OMP_NUM_THREADS=1
 NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
@@ -17,20 +20,13 @@ python -m nanochat.report reset
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
-EVAL_BUNDLE_URL=https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip
-if [ ! -d "$NANOCHAT_BASE_DIR/eval_bundle" ]; then
-    curl -L -o eval_bundle.zip $EVAL_BUNDLE_URL
-    unzip -q eval_bundle.zip
-    rm eval_bundle.zip
-    mv eval_bundle $NANOCHAT_BASE_DIR
-fi
 
 # train tokenizer on ~4B characters and kick off download of the rest for pretraining
 python -m nanochat.dataset -n 16
 # start downloading the rest of the shards for a total of 800 (see below why 800)
 python -m nanochat.dataset -n 800 &
 # todo: download the rest of it
-python -m scripts.tok_train --max_chars=4000000000
+python -m scripts.tok_train --max-chars=4000000000
 python -m scripts.tok_eval
 
 # Documenting my process for determining the hyperparameters for this run1000.sh script:
@@ -74,18 +70,19 @@ python -m scripts.tok_eval
 # which would decrease model performance. Possibly 2, 3 or so epochs is ~ok, but certainly not ideal and at 10+ epochs we'd
 # start to overfit hard.
 # 5) That's it, everything else (e.g. the learning rates) is adjusted automatically by the training script.
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=32 --device_batch_size=8
-torchrun --standalone --nproc_per_node=8 -m scripts.base_loss
-torchrun --standalone --nproc_per_node=8 -m scripts.base_eval
+NPN=8
+torchrun --standalone --nproc_per_node=$NPN -m scripts.base_train -- --depth=32 --device-batch-size=8 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPN -m scripts.base_loss
+torchrun --standalone --nproc_per_node=$NPN -m scripts.base_eval
 
 # midtrain
 # NOTE: ensure that we use the same device_batch_size here as the base training script.
-torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- --device_batch_size=8 --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i mid
+torchrun --standalone --nproc_per_node=$NPN -m scripts.mid_train -- --device-batch-size=8 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPN -m scripts.chat_eval -- -i mid
 
 # sft
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
+torchrun --standalone --nproc_per_node=$NPN -m scripts.chat_sft -- --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPN -m scripts.chat_eval -- -i sft
 
 # generate final report
 python -m nanochat.report generate

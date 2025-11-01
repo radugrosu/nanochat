@@ -29,21 +29,21 @@ NOTE: You need OpenRouter API key in a file called "openroutertoken.txt" in the 
 NOTE: For more details see this discussion: https://github.com/karpathy/nanochat/discussions/139
 """
 
-import requests
-import json
-import os
 import copy
+import json
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
+
 from nanochat.common import get_base_dir
 
-api_key = open("openroutertoken.txt").read().strip()
+api_key = open("openroutertoken.txt", encoding='utf-8').read().strip()
 
 url = "https://openrouter.ai/api/v1/chat/completions"
 headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-readme = open("README.md").read().strip()
+readme = open("README.md", encoding='utf-8').read().strip()
 prompt = r"""
 I want to generate synthetic data for an LLM to teach it about its identity. Here is the identity I want:
 
@@ -342,10 +342,10 @@ def generate_conversation(idx: int):
 num_conversations = 1000
 num_workers = 4
 
-output_file = os.path.join(get_base_dir(), "identity_conversations.jsonl")
+output_file = get_base_dir() / "identity_conversations.jsonl"
 # Wipe the file clean first to reset it
-if os.path.exists(output_file):
-    os.remove(output_file)
+if output_file.exists():
+    output_file.unlink()
 print(f"Saving to {output_file}")
 
 # Use ThreadPoolExecutor to generate conversations in parallel
