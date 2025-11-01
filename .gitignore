@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 rustbpe/target/
 dev-ignore/
+typings
+target
+eval_bundle
+.env

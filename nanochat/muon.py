@@ -2,12 +2,15 @@
 Muon optimizer from Keller et al.
 Also a lot of borrowing of ideas from modded-nanogpt.
 """
+
+from typing import Iterable
+
 import torch
-from torch import Tensor
 import torch.distributed as dist
 
+
 @torch.compile
-def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
+def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int) -> torch.Tensor:
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
     quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
@@ -17,8 +20,10 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
     performance at all relative to UV^T, where USV^T = G is the SVD.
     """
-    assert G.ndim >= 2 # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
-    a, b, c = (3.4445, -4.7750,  2.0315)
+    assert (
+        G.ndim >= 2
+    )  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
+    a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.bfloat16()
     if G.size(-2) > G.size(-1):
         X = X.mT
@@ -28,12 +33,15 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     # Perform the NS iterations
     for _ in range(steps):
         A = X @ X.mT
-        B = b * A + c * A @ A # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
+        B = (
+            b * A + c * A @ A
+        )  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
 
     if G.size(-2) > G.size(-1):
         X = X.mT
     return X
+
 
 class Muon(torch.optim.Optimizer):
     """
@@ -57,9 +65,17 @@ class Muon(torch.optim.Optimizer):
         nesterov: Whether to use Nesterov-style momentum in the internal SGD. (recommended)
         ns_steps: The number of Newton-Schulz iteration steps to use.
     """
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
+
+    def __init__(
+        self,
+        params: Iterable[torch.Tensor],  # type: ignore
+        lr: float = 0.02,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_steps: int = 5,
+    ):
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
-        params: list[Tensor] = [*params]
+        params: list[torch.Tensor] = [*params]
         param_groups = []
         for size in {p.numel() for p in params}:
             group = dict(params=[p for p in params if p.numel() == size])
@@ -67,20 +83,20 @@ class Muon(torch.optim.Optimizer):
         super().__init__(param_groups, defaults)
 
     @torch.no_grad()
-    def step(self):
+    def step(self):  # type: ignore
         for group in self.param_groups:
-            params: list[Tensor] = group["params"]
+            params: list[torch.Tensor] = group["params"]
             for p in params:
                 g = p.grad
                 assert g is not None
                 state = self.state[p]
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
-                buf: Tensor = state["momentum_buffer"]
+                buf: torch.Tensor = state["momentum_buffer"]
                 buf.lerp_(g, 1 - group["momentum"])
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                 g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
-                p.add_(g, alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
+                p.add_(g, alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1)) ** 0.5)
 
 
 class DistMuon(torch.optim.Optimizer):
@@ -104,84 +120,101 @@ class DistMuon(torch.optim.Optimizer):
         nesterov: if True, Nesterov-style update (g <- lerp(g, buf, momentum)); else use buf
         ns_steps: number of Newton–Schulz iterations for the orthogonalization
     """
-    def __init__(self, params, lr: float = 0.02, momentum: float = 0.95,
-                 nesterov: bool = True, ns_steps: int = 5):
+
+    def __init__(
+        self,
+        params,
+        lr: float = 0.02,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_steps: int = 5,
+    ):
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
         params = list(params)
         assert all(p.ndim == 2 for p in params), "Muon expects 2D parameters only"
         rank = dist.get_rank()
         # Group all parameters by their shape
-        shapes = sorted({p.shape for p in params}) # sort to ensure consistent / deterministic ordering
-        param_groups = []
+        shapes = sorted(
+            {p.shape for p in params}
+        )  # sort to ensure consistent / deterministic ordering
+        param_groups: list[dict[str, list[torch.Tensor] | torch.Tensor]] = []
         for shape in shapes:
-            group_params = [p for p in params if p.shape == shape]
+            group_params: list[torch.Tensor] = [p for p in params if p.shape == shape]
             device, dtype = group_params[0].device, group_params[0].dtype
             assert all(p.device == device for p in group_params)
             assert all(p.dtype == dtype for p in group_params)
             if rank == 0:
-                print(f"Muon: Grouping {len(group_params)} params of shape {shape}, device {device}, dtype {dtype}")
-            param_groups.append(dict(params=group_params, zero_buffer=torch.zeros_like(group_params[0])))
+                print(
+                    f"Muon: Grouping {len(group_params)} params of shape {shape}, device {device}, dtype {dtype}"
+                )
+            param_groups.append(
+                dict(params=group_params, zero_buffer=torch.zeros_like(group_params[0]))
+            )
         super().__init__(param_groups, defaults)
 
     @torch.no_grad()
-    def step(self):
+    def step(self):  # type: ignore
+        assert all(p.grad is not None for group in self.param_groups for p in group["params"]), (
+            "All params must have grads"
+        )
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-        # Ensure all grads exist
-        assert all(p.grad is not None for group in self.param_groups for p in group["params"]), "All params must have grads"
-
-        # Kick off all the reduce scatter operations to average up the gradients across all ranks
-        all_reduce_futures = []
+        reduce_scatter_futures = []
         for group in self.param_groups:
-            params = group["params"]
-            zero_buffer = group["zero_buffer"]
+            params: list[torch.Tensor] = group["params"]
+            zero_buffer: torch.Tensor = group["zero_buffer"]
             # Go through params in groups of world_size.
-            for base_i in range(0, len(params), world_size):
-                # The compute owner of each param is rank i % world_size
-                owner_idx = base_i + rank
+            for i in range(0, len(params), world_size):
+                owner_idx = i + rank
                 # each rank stacks up its chunk of world_size params into a list
-                rs_input = [p.grad for p in params[base_i:base_i + world_size]]
+                rs_input: list[torch.Tensor] = [p.grad for p in params[i : i + world_size]]  # type: ignore
                 # pad rs_input with the zero buffer to complete the group
                 rs_input.extend([zero_buffer] * (world_size - len(rs_input)))
                 # the output buffer gets strided across the group based on the rank
-                rs_output = params[owner_idx].grad if owner_idx < len(params) else torch.empty_like(zero_buffer)
+                rs_output = (
+                    params[owner_idx].grad
+                    if owner_idx < len(params)
+                    else torch.empty_like(zero_buffer)
+                )
                 # reduce scatter the gradients within this group of world_size params
-                work = dist.reduce_scatter(rs_output, rs_input, op=dist.ReduceOp.AVG, async_op=True).get_future()
-                all_reduce_futures.append(work)
+                work = dist.reduce_scatter(
+                    rs_output, rs_input, op=dist.ReduceOp.AVG, async_op=True
+                ).get_future()  # type: ignore
+                reduce_scatter_futures.append(work)
 
-        # Now each rank computes the update and gathers
         future_idx = 0
-        all_gather_futures = []
+        all_gather_futures: list[torch.Future[torch.Tensor]] = []
         for group in self.param_groups:
             params = group["params"]
             zero_buffer = group["zero_buffer"]
-            # Go through params in groups of world_size.
-            for base_i in range(0, len(params), world_size):
-                # The compute owner of each param is rank i % world_size
-                owner_idx = base_i + rank # calculate the index of the param that this rank owns
-                # Wait for the reduce scatter to complete
-                all_reduce_futures[future_idx].wait() # possibly later we could use wait_any polling instead
+            for i in range(0, len(params), world_size):
+                owner_idx = i + rank
+                reduce_scatter_futures[future_idx].wait()
                 future_idx += 1
                 # Owner computes the Muon update, result is in its param
                 if owner_idx < len(params):
                     p = params[owner_idx]
                     g = p.grad  # now averaged across ranks
+                    assert g is not None
                     state = self.state[p]
                     if "momentum_buffer" not in state:
                         state["momentum_buffer"] = torch.zeros_like(g)
-                    buf: Tensor = state["momentum_buffer"]
+                    buf: torch.Tensor = state["momentum_buffer"]
                     buf.lerp_(g, 1.0 - group["momentum"])
                     g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                     g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
-                    scale = (max(1.0, p.size(-2) / p.size(-1)) ** 0.5)
+                    scale = max(1.0, p.size(-2) / p.size(-1)) ** 0.5
                     p.add_(g, alpha=-group["lr"] * scale)
                 # Replicate updated parameters to all ranks
                 ag_input = params[owner_idx] if owner_idx < len(params) else zero_buffer
-                ag_output = params[base_i:base_i + world_size]
-                ag_output.extend([torch.empty_like(zero_buffer) for _ in range(world_size - len(ag_output))]) # pad
-                work = dist.all_gather(ag_output, ag_input, async_op=True).get_future()
+                ag_output = params[i : i + world_size]
+                ag_output.extend(
+                    [torch.empty_like(zero_buffer) for _ in range(world_size - len(ag_output))]
+                )  # pad
+                work = dist.all_gather(ag_output, ag_input, async_op=True).get_future()  # type: ignore
                 all_gather_futures.append(work)
 
-        # Wait for all work to finish
-        torch.futures.collect_all(all_gather_futures).wait()
+        torch.futures.collect_all(
+            all_gather_futures, # type: ignore
+        ).wait()

@@ -1,12 +1,26 @@
 """
 A number of functions that help with evaluating a base model.
 """
+
+from __future__ import annotations
+
 import math
+from typing import TYPE_CHECKING, Iterable
+
 import torch
 import torch.distributed as dist
 
+if TYPE_CHECKING:
+    from nanochat.gpt import GPT
+
+
 @torch.no_grad()
-def evaluate_bpb(model, batches, steps, token_bytes):
+def evaluate_bpb(
+    model: GPT,
+    batches: Iterable[tuple[torch.Tensor, torch.Tensor]],
+    steps: int,
+    token_bytes: torch.Tensor,
+) -> float:
     """
     Instead of the naive 'mean loss', this function returns the bits per byte (bpb),
     which is a tokenization vocab size-indepedent metric, meaning you are still comparing
@@ -30,19 +44,17 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     batch_iter = iter(batches)
     for _ in range(steps):
         x, y = next(batch_iter)
-        loss2d = model(x, y, loss_reduction='none') # (B, T)
-        loss2d = loss2d.view(-1) # flatten
-        y = y.view(-1) # flatten
-        if (y < 0).any():
+        loss2d = model(x, y, loss_reduction="none")  # (B, T)
+        loss2d = loss2d.view(-1)  # flatten
+        y = y.view(-1)  # flatten
+        if (y.int() < 0).any():  # mps does not currently have kernel for < 0 for int64, only int3
             # slightly more complex code path if some target tokens are ignore_index (e.g. -1)
             # any target token < 0 is to be ignored: do NOT index token_bytes with negatives
             valid = y >= 0
             y_safe = torch.where(valid, y, torch.zeros_like(y))
             # map valid targets to their byte length; ignored targets contribute 0 bytes
             num_bytes2d = torch.where(
-                valid,
-                token_bytes[y_safe],
-                torch.zeros_like(y, dtype=token_bytes.dtype)
+                valid, token_bytes[y_safe], torch.zeros_like(y, dtype=token_bytes.dtype)
             )
             total_nats += (loss2d * (num_bytes2d > 0)).sum()
             total_bytes += num_bytes2d.sum()
@@ -59,5 +71,7 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     # move both to cpu, calculate bpb and return
     total_nats = total_nats.item()
     total_bytes = total_bytes.item()
+    if total_bytes == 0:
+        return float("inf")
     bpb = total_nats / (math.log(2) * total_bytes)
     return bpb

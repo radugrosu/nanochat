@@ -11,20 +11,31 @@ Notes:
 The whole thing is made as efficient as possible.
 """
 
-import torch
-import torch.nn.functional as F
+from __future__ import annotations
+
 import signal
 import warnings
-from contextlib import contextmanager
 from collections import deque
-from nanochat.common import compute_init
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, NoReturn, Self
+
+import torch
+import torch.nn.functional as F
+
 from nanochat.checkpoint_manager import load_model
+from nanochat.common import compute_init
+
+if TYPE_CHECKING:
+    from nanochat.gpt import GPT
+    from nanochat.tokenizer import RustBPETokenizer
+
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
 @contextmanager
-def timeout(duration, formula):
-    def timeout_handler(signum, frame):
+def timeout(duration: int, formula: str):
+    def timeout_handler(*_: Any) -> NoReturn:
         raise Exception(f"'{formula}': timed out after {duration} seconds")
 
     signal.signal(signal.SIGALRM, timeout_handler)
@@ -32,25 +43,70 @@ def timeout(duration, formula):
     yield
     signal.alarm(0)
 
-def eval_with_timeout(formula, max_time=3):
+
+def eval_with_timeout(formula: str, max_time: int = 3) -> Any:
     try:
         with timeout(max_time, formula):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", SyntaxWarning)
                 return eval(formula)
-    except Exception as e:
+    except Exception as _:
         signal.alarm(0)
         # print(f"Warning: Failed to eval {formula}, exception: {e}") # it's ok ignore wrong calculator usage
         return None
 
-def use_calculator(expr):
-    """Evaluate a math expression safely."""
+
+def use_calculator(expr: str) -> Any:
+    """
+    Evaluate a Python expression safely.
+    Supports both math expressions and string operations like .count()
+    """
+    # Remove commas from numbers
     expr = expr.replace(",", "")
-    if any([x not in "0123456789*+-/.() " for x in expr]): # for now disallow non-numeric chars
+
+    # Check if it's a pure math expression (old behavior)
+    if all([x in "0123456789*+-/.() " for x in expr]):
+        if "**" in expr:  # disallow power operator
+            return None
+        return eval_with_timeout(expr)
+
+    # Check if it's a string operation we support
+    # Allow: strings (single/double quotes), .count(), letters, numbers, spaces, parens
+    allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'\"()._ "
+    if not all([x in allowed_chars for x in expr]):
         return None
-    if "**" in expr: # for now disallow power operator, could be very expensive
+
+    # Disallow dangerous patterns
+    dangerous_patterns = [
+        "__",
+        "import",
+        "exec",
+        "eval",
+        "compile",
+        "open",
+        "file",
+        "input",
+        "raw_input",
+        "globals",
+        "locals",
+        "vars",
+        "dir",
+        "getattr",
+        "setattr",
+        "delattr",
+        "hasattr",
+    ]
+    expr_lower = expr.lower()
+    if any(pattern in expr_lower for pattern in dangerous_patterns):
         return None
+
+    # Only allow .count() method for now (can expand later)
+    if ".count(" not in expr:
+        return None
+
+    # Evaluate with timeout
     return eval_with_timeout(expr)
+
 
 # -----------------------------------------------------------------------------
 class KVCache:
@@ -59,19 +115,21 @@ class KVCache:
     Note that the .pos advances automatically after the last layer of the Transformer inserts.
     """
 
-    def __init__(self, batch_size, num_heads, seq_len, head_dim, num_layers):
+    def __init__(
+        self, batch_size: int, num_heads: int, seq_len: int, head_dim: int, num_layers: int
+    ):
         # Each of K/V is of shape (B, H, T, D) and we have one per layer of the Transformer.
         self.kv_shape = (num_layers, 2, batch_size, num_heads, seq_len, head_dim)
         self.kv_cache = None
-        self.pos = 0 # current position in time in the cache
+        self.pos = 0  # current position in time in the cache
 
     def reset(self):
         self.pos = 0
 
-    def get_pos(self):
+    def get_pos(self) -> int:
         return self.pos
 
-    def prefill(self, other):
+    def prefill(self, other: Self):
         """
         Prefill given another KV cache. Optionally expand along batch dim.
         This is used when we do batch 1 prefill and then want to generate
@@ -94,24 +152,28 @@ class KVCache:
         dtype, device = other.kv_cache.dtype, other.kv_cache.device
         self.kv_cache = torch.empty(self.kv_shape, dtype=dtype, device=device)
         # 3) copy the data over
-        self.kv_cache[:, :, :, :, :other.pos, :] = other.kv_cache
+        self.kv_cache[:, :, :, :, : other.pos, :] = other.kv_cache
         # 4) update the pos
         self.pos = other.pos
 
-    def insert_kv(self, layer_idx, k, v):
+    def insert_kv(
+        self, layer_idx: int, k: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Lazy initialize the cache here because we need to know the dtype/device
         if self.kv_cache is None:
             self.kv_cache = torch.empty(self.kv_shape, dtype=k.dtype, device=k.device)
         # Insert new keys/values to the cache and return the full cache so far
-        B, H, T_add, D = k.size()
+        _, _, T_add, _ = k.size()
         t0, t1 = self.pos, self.pos + T_add
         # Dynamically grow the cache if needed
         if t1 > self.kv_cache.size(4):
-            t_needed = t1 + 1024 # as much as we need plus buffer of 1024
-            t_needed = (t_needed + 1023) & ~1023 # then round up to the nearest multiple of 1024
-            current_shape = list(self.kv_cache.shape)
-            current_shape[4] = t_needed
-            self.kv_cache.resize_(current_shape)
+            t_needed = t1 + 1024  # as much as we need plus buffer of 1024
+            t_needed = (t_needed + 1023) & ~1023  # then round up to the nearest multiple of 1024
+            additional_shape = list(self.kv_cache.shape)
+            additional_shape[4] = t_needed - self.kv_cache.size(4)
+            additional_cache = torch.empty(additional_shape, dtype=k.dtype, device=k.device)
+            self.kv_cache = torch.cat([self.kv_cache, additional_cache], dim=4).contiguous()
+            self.kv_shape = self.kv_cache.shape
         # Insert k, v into the cache
         self.kv_cache[layer_idx, 0, :, :, t0:t1] = k
         self.kv_cache[layer_idx, 1, :, :, t0:t1] = v
@@ -126,7 +188,12 @@ class KVCache:
 
 # -----------------------------------------------------------------------------
 @torch.inference_mode()
-def sample_next_token(logits, rng, temperature=1.0, top_k=None):
+def sample_next_token(
+    logits: torch.Tensor,
+    rng: torch.Generator,
+    temperature: float = 1.0,
+    top_k: int | None = None,
+) -> torch.Tensor:
     """Sample a single next token from given logits of shape (B, vocab_size). Returns (B, 1)."""
     assert temperature >= 0.0, "temperature must be non-negative"
     if temperature == 0.0:
@@ -143,25 +210,35 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
         probs = F.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1, generator=rng)
 
+
 # -----------------------------------------------------------------------------
+
 
 class RowState:
     # Per-row state tracking during generation
-    def __init__(self, current_tokens=None):
-        self.current_tokens = current_tokens or [] # Current token sequence for this row
-        self.forced_tokens = deque() # Queue of tokens to force inject
-        self.in_python_block = False # Whether we are inside a python block
-        self.python_expr_tokens = [] # Tokens of the current python expression
-        self.completed = False # Whether this row has completed generation
+    def __init__(self, current_tokens: list[int] | None = None):
+        self.current_tokens: list[int] = current_tokens or []  # Current token sequence for this row
+        self.forced_tokens: deque[int] = deque()  # Queue of tokens to force inject
+        self.in_python_block: bool = False  # Whether we are inside a python block
+        self.python_expr_tokens: list[int] = []  # Tokens of the current python expression
+        self.completed: bool = False  # Whether this row has completed generation
 
+
+@dataclass
 class Engine:
-
-    def __init__(self, model, tokenizer):
-        self.model = model
-        self.tokenizer = tokenizer # needed for tool use
+    model: GPT
+    tokenizer: RustBPETokenizer  # needed for tool use
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
+    def generate(
+        self,
+        tokens: list[int],
+        num_samples: int = 1,
+        max_tokens: int | None = None,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        seed: int = 42,
+    ):
         """Same as generate, but does single prefill and then clones the KV cache."""
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
@@ -169,17 +246,22 @@ class Engine:
         rng.manual_seed(seed)
 
         # Get the special tokens we need to coordinate the tool use state machine
-        get_special = lambda s: self.tokenizer.encode_special(s)
+        get_special = self.tokenizer.encode_special
+
         python_start = get_special("<|python_start|>")
         python_end = get_special("<|python_end|>")
         output_start = get_special("<|output_start|>")
         output_end = get_special("<|output_end|>")
-        assistant_end = get_special("<|assistant_end|>") # if sampled, ends row
-        bos = self.tokenizer.get_bos_token_id() # if sampled, ends row
+        assistant_end = get_special("<|assistant_end|>")  # if sampled, ends row
+        bos = self.tokenizer.get_bos_token_id()  # if sampled, ends row
 
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
-        kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
+        kv_model_kwargs = {
+            "num_heads": m.n_kv_head,
+            "head_dim": m.n_embd // m.n_head,
+            "num_layers": m.n_layer,
+        }
         kv_cache_prefill = KVCache(
             batch_size=1,
             seq_len=len(tokens),
@@ -187,19 +269,21 @@ class Engine:
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
         logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
-        logits = logits[:, -1, :]
-        next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
-        sampled_tokens = next_ids[:, 0].tolist()
+        logits = logits[:, -1, :]  # (1, V)
+        next_ids = sample_next_token(logits, rng, temperature, top_k)  # (1, 1)
+        sampled_tokens: list[int] = next_ids[:, 0].tolist()  # sampled token
 
         # 2) Replicate the KV cache for each sample/row
-        kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
+        kv_length_hint = (
+            (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
+        )
         kv_cache_decode = KVCache(
             batch_size=num_samples,
             seq_len=kv_length_hint,
             **kv_model_kwargs,
         )
         kv_cache_decode.prefill(kv_cache_prefill)
-        del kv_cache_prefill # no need to keep this memory around
+        del kv_cache_prefill  # no need to keep this memory around
 
         # 3) Initialize states for each sample
         row_states = [RowState(tokens.copy()) for _ in range(num_samples)]
@@ -218,7 +302,9 @@ class Engine:
             # Get sampled tokens - either from prefill or from forward pass
             if first_iteration:
                 # Use the tokens we already sampled from prefill
-                sampled_tokens = [sampled_tokens[0]] * num_samples  # Broadcast first token to all rows
+                sampled_tokens = [
+                    sampled_tokens[0]
+                ] * num_samples  # Broadcast first token to all rows
                 # TODO: we should sample a token for each row instead of broadcasting
                 first_iteration = False
             else:
@@ -229,12 +315,15 @@ class Engine:
                 sampled_tokens = next_ids[:, 0].tolist()
 
             # Process each row: choose the next token, update state, optional tool use
-            token_column = [] # contains the next token id along each row
-            token_masks = [] # contains the mask (was it sampled (1) or forced (0)?) along each row
+            token_column: list[int] = []  # contains the next token id along each row
+            # contains the mask (was it sampled (1) or forced (0)?) along each row
+            token_masks: list[int] = []
             for i, state in enumerate(row_states):
                 # Select the next token in this row
-                is_forced = len(state.forced_tokens) > 0 # are there tokens waiting to be forced in deque?
-                token_masks.append(0 if is_forced else 1) # mask is 0 if forced, 1 if sampled
+                is_forced = (
+                    len(state.forced_tokens) > 0
+                )  # are there tokens waiting to be forced in deque?
+                token_masks.append(0 if is_forced else 1)  # mask is 0 if forced, 1 if sampled
                 next_token = state.forced_tokens.popleft() if is_forced else sampled_tokens[i]
                 token_column.append(next_token)
                 # Update the state of this row to include the next token
@@ -266,7 +355,15 @@ class Engine:
             # Prepare ids for next iteration
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
 
-    def generate_batch(self, tokens, num_samples=1, **kwargs):
+    def generate_batch(
+        self,
+        tokens: list[int],
+        num_samples: int = 1,
+        max_tokens: int | None = None,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        seed: int = 42,
+    ) -> tuple[list[list[int]], list[list[int]]]:
         """
         Non-streaming batch generation that just returns the final token sequences.
         Returns a list of token sequences (list of lists of ints).
@@ -277,7 +374,9 @@ class Engine:
         results = [tokens.copy() for _ in range(num_samples)]
         masks = [[0] * len(tokens) for _ in range(num_samples)]
         completed = [False] * num_samples
-        for token_column, token_masks in self.generate(tokens, num_samples, **kwargs):
+        for token_column, token_masks in self.generate(
+            tokens, num_samples, max_tokens, temperature, top_k, seed
+        ):
             for i, (token, mask) in enumerate(zip(token_column, token_masks)):
                 if not completed[i]:
                     if token == assistant_end or token == bos:
@@ -297,20 +396,22 @@ if __name__ == "__main__":
     is equivalent to the faster Engine.generate function here.
     """
     import time
+
     # init compute
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init()
     # load the model and tokenizer
     model, tokenizer, meta = load_model("base", device, phase="eval")
     bos_token_id = tokenizer.get_bos_token_id()
     # common hyperparameters
-    kwargs = dict(max_tokens=64, temperature=0.0)
+    max_tokens = 64
+    temperature = 0.0
     # set the starting prompt
     prompt_tokens = tokenizer.encode("The chemical formula of water is", prepend=bos_token_id)
     # generate the reference sequence using the model.generate() function
-    generated_tokens = []
+    generated_tokens: list[int] = []
     torch.cuda.synchronize()
     t0 = time.time()
-    stream = model.generate(prompt_tokens, **kwargs)
+    stream = model.generate(prompt_tokens, max_tokens, temperature)
     for token in stream:
         generated_tokens.append(token)
         chunk = tokenizer.decode([token])
@@ -323,11 +424,11 @@ if __name__ == "__main__":
     # generate tokens with Engine
     generated_tokens = []
     engine = Engine(model, tokenizer)
-    stream = engine.generate(prompt_tokens, num_samples=1, **kwargs) # note: runs in fp32
+    stream = engine.generate(prompt_tokens, 1, max_tokens, temperature)  # note: runs in fp32
     torch.cuda.synchronize()
     t0 = time.time()
     for token_column, token_masks in stream:
-        token = token_column[0] # only print out the first row
+        token = token_column[0]  # only print out the first row
         generated_tokens.append(token)
         chunk = tokenizer.decode([token])
         print(chunk, end="", flush=True)

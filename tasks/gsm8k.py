@@ -15,12 +15,17 @@ Notice that GSM8K uses tool calls inside << >> tags.
 """
 
 import re
-from datasets import load_dataset
+from typing import Literal, cast
+
+from datasets import Dataset, load_dataset
+
+from nanochat.tokenizer import ContentDict, Conversation, Message
 from tasks.common import Task
 
-
 GSM_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
-def extract_answer(completion):
+
+
+def extract_answer(completion: str) -> str | None:
     """
     Extract the numerical answer after #### marker.
     Follows official code for normalization:
@@ -35,36 +40,39 @@ def extract_answer(completion):
 
 
 class GSM8K(Task):
-
-    def __init__(self, subset, split, **kwargs):
+    def __init__(
+        self, subset: Literal["main", "socratic"], split: Literal["train", "test"], **kwargs
+    ):
         super().__init__(**kwargs)
         assert subset in ["main", "socratic"], "GSM8K subset must be main|socratic"
         assert split in ["train", "test"], "GSM8K split must be train|test"
-        self.ds = load_dataset("openai/gsm8k", subset, split=split).shuffle(seed=42)
+        ds = load_dataset("openai/gsm8k", subset, split=split).shuffle(seed=42)
+        ds = cast(Dataset, ds)
+        self.ds = ds
 
     @property
-    def eval_type(self):
-        return 'generative'
+    def eval_type(self) -> Literal["generative"]:
+        return "generative"
 
-    def num_examples(self):
+    def num_examples(self) -> int:
         return len(self.ds)
 
-    def get_example(self, index):
-        """ Get a single problem from the dataset. """
+    def get_example(self, index: int) -> Conversation:
+        """Get a single problem from the dataset."""
         row = self.ds[index]
-        question = row['question'] # string of the question prompt
-        answer = row['answer'] # string of the full solution and the answer after #### marker
+        question: str = row["question"]  # string of the question prompt
+        answer: str = row["answer"]  # string of the full solution and the answer after #### marker
         # Create and return the Conversation object
         # This is tricky because GSM8K uses tool calls, which we need to parse here.
-        assistant_message_parts = []
-        parts = re.split(r'(<<[^>]+>>)', answer)
+        assistant_message_parts: list[ContentDict] = []
+        parts = re.split(r"(<<[^>]+>>)", answer)
         for part in parts:
-            if part.startswith('<<') and part.endswith('>>'):
+            if part.startswith("<<") and part.endswith(">>"):
                 # This is a calculator tool call
                 inner = part[2:-2]  # Remove << >>
                 # Split on = to get expression and result
-                if '=' in inner:
-                    expr, result = inner.rsplit('=', 1)
+                if "=" in inner:
+                    expr, result = inner.rsplit("=", 1)
                 else:
                     expr, result = inner, ""
                 # Add the tool call as a part
@@ -75,16 +83,19 @@ class GSM8K(Task):
                 # Regular text in between tool calls
                 assistant_message_parts.append({"type": "text", "text": part})
         # No put it all together
-        messages = [
-            {"role": "user", "content": question}, # note: simple string
-            {"role": "assistant", "content": assistant_message_parts}, # note: list of parts (as dicts)
+        messages: list[Message] = [
+            {"role": "user", "content": question},  # note: simple string
+            {
+                "role": "assistant",
+                "content": assistant_message_parts,
+            },  # note: list of parts (as dicts)
         ]
-        conversation = {
+        conversation: Conversation = {
             "messages": messages,
         }
         return conversation
 
-    def evaluate(self, conversation, assistant_response):
+    def evaluate(self, conversation: Conversation, response: str) -> bool:
         """
         Given (conversation, completion), return evaluation outcome (0 = wrong, 1 = correct)
         Note that:
@@ -94,24 +105,26 @@ class GSM8K(Task):
         TODO: Technically, assistant_response should be a Message (either a string or a list of parts)
               We can handle this later possibly. For now just assume string.
         """
-        assert isinstance(assistant_response, str), "Assuming simple string response for now"
+        assert isinstance(response, str), "Assuming simple string response for now"
         # First extract the ground truth answer
-        assistant_message = conversation['messages'][-1]
-        assert assistant_message['role'] == "assistant", "Last message must be from the Assistant"
-        assert isinstance(assistant_message['content'], list), "This is expected to be a list of parts"
-        last_text_part = assistant_message['content'][-1]['text'] # this contains the final answer in GSM8K
+        assistant_message = conversation["messages"][-1]
+        assert assistant_message["role"] == "assistant", "Last message must be from the Assistant"
+        assert isinstance(assistant_message["content"], list), (
+            "This is expected to be a list of parts"
+        )
+        last_text_part = assistant_message["content"][-1][
+            "text"
+        ]  # this contains the final answer in GSM8K
         # Extract both the ground truth answer and the predicted answer
         ref_num = extract_answer(last_text_part)
-        pred_num = extract_answer(assistant_response)
-        # Compare and return the success as int
-        is_correct = int(pred_num == ref_num)
+        pred_num = extract_answer(response)
+        is_correct = pred_num == ref_num
         return is_correct
 
-    def reward(self, conversation, assistant_response):
+    def reward(self, conversation: Conversation, assistant_response: str) -> float:
         """
         Used during RL. To keep things simple, just re-use the evaluation above.
         Later this could be made more complex (e.g. format matching etc.)
         """
         is_correct = self.evaluate(conversation, assistant_response)
-        is_correct_float = float(is_correct)
-        return is_correct_float
+        return float(is_correct)

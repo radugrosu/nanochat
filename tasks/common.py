@@ -6,48 +6,52 @@ Example tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk.
 """
 
 import random
+from typing import Iterable, Literal
 
-class Task:
-    """
-    Base class of a Task. Allows for lightweight slicing of the underlying dataset.
-    """
+from nanochat.tokenizer import Conversation
 
-    def __init__(self, start=0, stop=None, step=1):
+
+class Task[T]:
+    """Base class of a Task. Allows for lightweight slicing of the underlying dataset."""
+
+    def __init__(self, start: int = 0, stop: int | None = None, step: int = 1):
         # allows a lightweight logical view over a dataset
         assert start >= 0, f"Start must be non-negative, got {start}"
-        assert stop is None or stop >= start, f"Stop should be greater than or equal to start, got {stop} and {start}"
+        assert stop is None or stop >= start, (
+            f"Stop should be greater than or equal to start, got {stop} and {start}"
+        )
         assert step >= 1, f"Step must be strictly positive, got {step}"
         self.start = start
-        self.stop = stop # could be None here
+        self.stop = stop  # could be None here
         self.step = step
 
     @property
-    def eval_type(self):
+    def eval_type(self) -> Literal["generative", "categorical"]:
         # one of 'generative' | 'categorical'
         raise NotImplementedError
 
-    def num_examples(self):
+    def num_examples(self) -> int:
         raise NotImplementedError
 
-    def get_example(self, index):
+    def get_example(self, index: int) -> T:
         raise NotImplementedError
 
-    def __len__(self):
+    def __len__(self) -> int:
         start = self.start
         stop = self.num_examples() if self.stop is None else self.stop
         step = self.step
         span = stop - start
-        num = (span + step - 1) // step # ceil_div(span, step)
-        assert num >= 0, f"Negative number of examples???: {num}" # prevent footguns
+        num = (span + step - 1) // step  # ceil_div(span, step)
+        assert num >= 0, f"Negative number of examples???: {num}"  # prevent footguns
         return num
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> T:
         assert isinstance(index, int), f"Index must be an integer, got {type(index)}"
         physical_index = self.start + index * self.step
         conversation = self.get_example(physical_index)
         return conversation
 
-    def evaluate(self, problem, completion):
+    def evaluate(self, conversation: T, response: str) -> bool:
         raise NotImplementedError
 
 
@@ -57,7 +61,7 @@ class TaskMixture(Task):
     Fun trick: if you wish to oversample any task, just pass it in multiple times in the list.
     """
 
-    def __init__(self, tasks, **kwargs):
+    def __init__(self, tasks: list[Task], **kwargs):
         super().__init__(**kwargs)
         # tasks is a list of Task objects
         self.tasks = tasks
@@ -73,15 +77,17 @@ class TaskMixture(Task):
         rng.shuffle(self.index_map)
         # Note: this is not the most elegant or best solution, but it's ok for now
 
-    def num_examples(self):
+    def num_examples(self) -> int:
         return self.num_conversations
 
-    def get_example(self, index):
+    def get_example(self, index: int) -> Conversation:
         """
         Access conversations according to a deterministic shuffle of all examples.
         This ensures tasks are mixed throughout training, regardless of dataset size.
         """
-        assert 0 <= index < self.num_conversations, f"Index {index} out of range for mixture with {self.num_conversations} conversations"
+        assert 0 <= index < self.num_conversations, (
+            f"Index {index} out of range for mixture with {self.num_conversations} conversations"
+        )
         task_idx, local_idx = self.index_map[index]
         return self.tasks[task_idx][local_idx]
 
@@ -92,7 +98,7 @@ class TaskSequence(Task):
     This is useful for cases that require a training curriculum.
     """
 
-    def __init__(self, tasks, **kwargs):
+    def __init__(self, tasks: list[Task], **kwargs):
         super().__init__(**kwargs)
         self.tasks = tasks
         self.lengths = [len(task) for task in self.tasks]
@@ -101,15 +107,18 @@ class TaskSequence(Task):
     def num_examples(self):
         return self.num_conversations
 
-    def get_example(self, index):
-        assert 0 <= index < self.num_conversations, f"Index {index} out of range for sequence with {self.num_conversations} conversations"
+    def get_example(self, index: int) -> Conversation:
+        assert 0 <= index < self.num_conversations, (
+            f"Index {index} out of range for sequence with {self.num_conversations} conversations"
+        )
         for task_idx, task_length in enumerate(self.lengths):
             if index < task_length:
                 return self.tasks[task_idx][index]
             index -= task_length
+        raise
 
 
-def render_mc(question, letters, choices):
+def render_mc(question: str, letters: Iterable[str], choices: list[str]) -> str:
     """
     The common multiple choice rendering format we will use.
 
