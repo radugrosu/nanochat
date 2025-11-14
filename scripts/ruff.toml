@@ -1,0 +1,2 @@
+extend = "../pyproject.toml"   # inherit everything from the project root
+line-length = 200              # <— your desired width for scripts

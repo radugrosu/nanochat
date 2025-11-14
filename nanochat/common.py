@@ -162,6 +162,8 @@ def compute_init(device_type: Literal["cuda", "mps", "cpu"] = "cuda"):
         )
 
     # Reproducibility
+    # Note that we set the global seeds here, but most of the code uses explicit rng objects.
+    # The only place where global rng might be used is nn.Module initialization of the model weights.
     torch.manual_seed(42)
     if device_type == "cuda":
         torch.cuda.manual_seed(42)

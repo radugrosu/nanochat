@@ -5,8 +5,8 @@ import typer
 T = TypeVar("T")
 
 
-def help(msg: str):
-    return typer.Option(help=msg)
+def opt(default: Any, msg: str):
+    return typer.Option(default, help=msg)
 
 
 def config_from_context(ctx: typer.Context) -> tuple[dict[str, Any], list[tuple[str, T, T]]]:

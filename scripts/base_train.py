@@ -1,11 +1,9 @@
 import os
 from functools import partial
-from typing import Annotated as A
 from typing import cast
 
 import typer
-
-from scripts.common import config_from_context, help
+from scripts.common import config_from_context, opt
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
@@ -13,8 +11,7 @@ from contextlib import nullcontext
 
 import torch
 import wandb
-
-from nanochat.checkpoint_manager import save_checkpoint
+from nanochat.checkpoint_manager import load_checkpoint, save_checkpoint
 from nanochat.common import (
     DummyWandb,
     autodetect_device_type,
@@ -24,7 +21,7 @@ from nanochat.common import (
     print0,
     print_banner,
 )
-from nanochat.dataloader import tokenizing_distributed_data_loader
+from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
 from nanochat.engine import Engine
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.loss_eval import evaluate_bpb
@@ -35,84 +32,55 @@ from scripts.base_eval import evaluate_model
 
 def main(
     ctx: typer.Context,
-    run: A[
-        str,
-        help('wandb run name default ("dummy" is special - we won\'t log to wandb)'),
-    ] = "dummy",
+    run: str = opt("dummy", 'wandb run name default ("dummy" is special - we won\'t log to wandb)'),
     # Runtime
-    device_type: A[
-        str,
-        help(
-            "cuda|cpu|mps (empty => autodetect good device type default, in order: CUDA > MPS > CPU)"
-        ),
-    ] = "",
+    device_type: str = opt("", "cuda|cpu|mps (empty => autodetect device in order: CUDA > MPS > CPU)"),
     # Model architecture
-    depth: A[
-        int,
-        help("The depth of the Transformer model to train, rest of the kwargs are derived"),
-    ] = 20,
-    max_seq_len: A[int, help("Max context length")] = 2048,
-    model_dim_aspect_ratio: A[
-        int, help("Aspect ratio (usually this is varied from 64 -> 128 as model size increases)")
-    ] = 64,
-    head_dim: A[int, typer.Option(help="Head dimension")] = 128,
-    num_kv_heads_factor: A[int, help("Number of key-value heads factor")] = 1,
+    depth: int = opt(20, "The depth of the Transformer model to train, rest of the kwargs are derived"),
+    max_seq_len: int = opt(2048, "Max context length"),
+    model_dim_aspect_ratio: int = opt(64, "Aspect ratio (usually varied from 64 -> 128 as model size increases)"),
+    head_dim: int = opt(128, "Head dimension"),
+    num_kv_heads_factor: int = opt(1, "Number of key-value heads factor"),
     # Training horizon
-    num_iterations: A[
-        int, help("Explicit number of steps of the optimization (-1 = disable)")
-    ] = -1,
-    target_flops: A[
-        float,
-        help(
-            "Calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)"
-        ),
-    ] = -1.0,
-    target_param_data_ratio: A[
-        int,
-        help(
-            "Calculate num_iterations to maintain fixed data:param ratio (Chinchilla=20) (-1 = disable)"
-        ),
-    ] = 20,
+    num_iterations: int = opt(-1, "Explicit number of steps of the optimization (-1 = disable)"),
+    target_flops: float = opt(-1.0, "Calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)"),
+    target_param_data_ratio: int = opt(20, "Calculate num_iterations to maintain fixed data:param ratio (Chinchilla=20) (-1 = disable)"),
     # Optimization
-    device_batch_size: A[int, help("Per-device batch size (set to not OOM)")] = 32,
-    total_batch_size: A[int, help("Total desired batch size, in #tokens")] = 524288,
-    embedding_lr: A[float, help("Learning rate for the embedding parameters (Adam)")] = 0.2,
-    unembedding_lr: A[float, help("Learning rate for the unembedding parameters (Adam)")] = 0.004,
-    weight_decay: A[
-        float, help("Weight decay for the embedding/unembedding parameters (Adam)")
-    ] = 0.0,
-    matrix_lr: A[float, help("Learning rate for the matrix parameters (Muon)")] = 0.02,
-    grad_clip: A[float, help("Gradient clipping value (0.0 = disabled)")] = 1.0,
+    device_batch_size: int = opt(32, "Per-device batch size (set to not OOM)"),
+    total_batch_size: int = opt(524288, "Total desired batch size, in #tokens"),
+    embedding_lr: float = opt(0.2, "Learning rate for the embedding parameters (Adam)"),
+    unembedding_lr: float = opt(0.004, "Learning rate for the unembedding parameters (Adam)"),
+    weight_decay: float = opt(0.0, "Weight decay for the embedding/unembedding parameters (Adam)"),
+    matrix_lr: float = opt(0.02, "Learning rate for the matrix parameters (Muon)"),
+    grad_clip: float = opt(1.0, "Gradient clipping value (0.0 = disabled)"),
     # Learning rate scheduler
-    warmup_ratio: A[float, help("Ratio of iterations for LR warmup")] = 0.0,
-    warmdown_ratio: A[float, help("Ratio of iterations for LR warmdown")] = 0.2,
-    final_lr_frac: A[float, help("Final LR is this fraction of the initial LR")] = 0.0,
+    warmup_ratio: float = opt(0.0, "Ratio of iterations for LR warmup"),
+    warmdown_ratio: float = opt(0.2, "Ratio of iterations for LR warmdown"),
+    final_lr_frac: float = opt(0.0, "Final LR is this fraction of the initial LR"),
     # Evaluation
-    eval_every: A[int, help("Every how many steps to evaluate the model for val bpb")] = 250,
-    eval_tokens: A[int, help("Number of tokens to evaluate val loss on")] = 20 * 524288,
-    core_metric_every: A[
-        int, help("Every how many steps to evaluate the core metric (-1 = disable)")
-    ] = 2000,
-    core_metric_max_per_task: A[int, help("Examples per task in estimating the core metric")] = 500,
-    sample_every: A[int, help("Every how many steps to sample from the model")] = 2000,
+    eval_every: int = opt(250, "Every how many steps to evaluate the model for val bpb"),
+    eval_tokens: int = opt(20 * 524288, "Number of tokens to evaluate val loss on"),
+    core_metric_every: int = opt(2000, "Every how many steps to evaluate the core metric (-1 = disable)"),
+    core_metric_max_per_task: int = opt(500, "Examples per task in estimating the core metric"),
+    sample_every: int = opt(2000, "Every how many steps to sample from the model"),
+    save_every: int = opt(-1, "every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)"),
     # Output
-    model_tag: A[
-        str, help("Optionally override the model tag for the output checkpoint directory name")
-    ] = "",
-    ema_beta: A[float, help("EMA decay factor")] = 0.9,
-    wandb_log_every: A[int, help("Log to wandb every N steps")] = 100,
+    resume_from_step: int = opt(-1, "resume training from this step of the optimization (-1 = disable)"),
+    model_tag: str = opt("", "Optionally override the model tag for the output checkpoint directory name"),
+    ema_beta: float = opt(0.9, "EMA decay factor"),
+    wandb_log_every: int = opt(100, "Log to wandb every N steps"),
 ):
     """
     Train model. Run as:
-
         python base_train.py
 
     or distributed as:
-
         torchrun --nproc_per_node=8 base_train.py
 
     If you are only on CPU/Macbook, you'll want to train a much much smaller LLM. Example:
-        python -m scripts.base_train --depth=4 --max_seq_len=512 --device_batch_size=1 --eval_tokens=512 --core_metric_every=-1 --total_batch_size=512 --num_iterations=20
+        python -m scripts.base_train\
+            --depth=4 --max_seq_len=512 --device_batch_size=1 --eval_tokens=512\
+            --core_metric_every=-1 --total_batch_size=512 --num_iterations=20
     """
     print_banner()
     user_config, overrides = config_from_context(ctx)
@@ -125,21 +93,13 @@ def main(
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     print0(f"Starting with: {ddp=}, {ddp_world_size=}")
     master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
-    autocast_ctx = (
-        torch.autocast(device_type=device_type, dtype=torch.bfloat16)
-        if device_type == "cuda"
-        else nullcontext()
-    )
+    autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
     synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
     get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 
     # wandb logging init
     use_dummy_wandb = run == "dummy" or not master_process
-    wandb_run = (
-        DummyWandb()
-        if use_dummy_wandb
-        else wandb.init(project="nanochat", name=run, config=user_config)
-    )
+    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=run, config=user_config)
 
     # Tokenizer will be useful for evaluation, also we need the vocab size
     tokenizer = get_tokenizer()
@@ -160,20 +120,15 @@ def main(
     # Optimizer / data / training length related hyperparameters
     # figure out the needed gradient accumulation to reach the desired total batch size
     tokens_per_fwdbwd = device_batch_size * max_seq_len  # tokens per iteration for a single rank
-    world_tokens_per_fwdbwd = (
-        tokens_per_fwdbwd * ddp_world_size
-    )  # total tokens per iteration for all ranks
+    world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size  # total tokens per iteration for all ranks
     assert total_batch_size % world_tokens_per_fwdbwd == 0
     grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
-    print0(
-        f"Tokens / micro-batch / rank: {device_batch_size} x {max_seq_len} = {tokens_per_fwdbwd:,}"
-    )
+    print0(f"Tokens / micro-batch / rank: {device_batch_size} x {max_seq_len} = {tokens_per_fwdbwd:,}")
     print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
-    print0(
-        f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}"
-    )
+    print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
     # -----------------------------------------------------------------------------
     # Initialize the Model
+    # Create a new model with random weights
     model_config_kwargs = dict(
         sequence_len=max_seq_len,
         vocab_size=vocab_size,
@@ -187,8 +142,22 @@ def main(
         model = GPT(model_config)
     model.to_empty(device=device)
     model.init_weights()
-    orig_model = model  # original, uncompiled model, for saving raw model state_dict
-    model = torch.compile(model, dynamic=False)  # TODO: dynamic True/False think through
+
+    # If we are resuming, overwrite the model parameters with those of the checkpoint
+    base_dir = get_base_dir()
+    output_dirname = model_tag if model_tag else f"d{depth}"  # e.g. d12
+    checkpoint_dir = base_dir / "base_checkpoints" / output_dirname
+    resuming = resume_from_step != -1
+    optimizer_data, meta_data = None, None  # type checker
+    if resuming:
+        print0(f"Resuming optimization from step {resume_from_step}")
+        model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, resume_from_step, device, load_optimizer=True, rank=ddp_rank)
+        model.load_state_dict(model_data, strict=True, assign=True)
+        del model_data  # free up this memory after the
+    # uncompiled model, for saving raw model state_dict
+    # and for inference/evaluation (because the shapes may change shape)
+    orig_model = model
+    model = torch.compile(model, dynamic=False)  # inputs to model will never change shape so dynamic=False is safe
     model = cast(GPT, model)
     num_params = sum(p.numel() for p in model.parameters())
     print0(f"Number of parameters: {num_params:,}")
@@ -225,11 +194,18 @@ def main(
     )
     _, muon_optimizer = optimizers
 
+    if resuming:
+        assert optimizer_data is not None
+        for opt, dat in zip(optimizers, optimizer_data):
+            opt.load_state_dict(dat)
+    del optimizer_data  # free up the memory
     # Initialize the DataLoaders for train/val
-    base_dir = get_base_dir()
-    train_loader = tokenizing_distributed_data_loader(
-        device_batch_size, max_seq_len, split="train", device=device
-    )
+    if resuming:
+        assert meta_data is not None
+        dataloader_resume_state_dict = meta_data["dataloader_state_dict"]
+    else:
+        dataloader_resume_state_dict = None
+    train_loader = tokenizing_distributed_data_loader_with_state(device_batch_size, max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
     build_val_loader = partial(
         tokenizing_distributed_data_loader,
         device_batch_size,
@@ -237,7 +213,7 @@ def main(
         split="val",
         device=device,
     )
-    x, y = next(train_loader)  # kick off load of the very first batch of data
+    x, y, dataloader_resume_state_dict = next(train_loader)  # kick off load of the very first batch of data
 
     # -----------------------------------------------------------------------------
     # Set up hyperparameter schedulers
@@ -260,12 +236,26 @@ def main(
         return momentum
 
     # -----------------------------------------------------------------------------
+    # Loop state (variables updated by the training loop)
+    if resuming:
+        assert meta_data
+        step = meta_data["step"]
+        loop_state = meta_data["loop_state"]
+        min_val_bpb = loop_state["min_val_bpb"]
+        smooth_train_loss = loop_state["smooth_train_loss"]
+        total_training_time = loop_state["total_training_time"]
+    else:
+        step = 0
+        min_val_bpb = float("inf")
+        smooth_train_loss = 0  # EMA of training loss
+        total_training_time = 0  # total wall-clock time of training
+
+    # -----------------------------------------------------------------------------
     # Training loop
-    min_val_bpb = val_bpb = float("inf")
-    smooth_train_loss = 0  # EMA of training loss
-    total_training_time = 0  # total wall-clock time of training
-    # note that we run +1 steps only so that we can eval and save at the end
-    for step in range(num_iterations + 1):
+    val_bpb = -1.0
+    dataloader_state_dict = None
+    while True:
+        # loop runs num_iterations+1 times so that we can eval/save at the end
         last_step = step == num_iterations
         flops_so_far = num_flops_per_token * total_batch_size * step
 
@@ -294,9 +284,7 @@ def main(
         if core_metric_every > 0 and (last_step or (step > 0 and step % core_metric_every == 0)):
             model.eval()
             with autocast_ctx:
-                results = evaluate_model(
-                    orig_model, tokenizer, device, max_per_task=core_metric_max_per_task
-                )
+                results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
             print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
             wandb_run.log(
                 {
@@ -325,23 +313,18 @@ def main(
             for prompt in prompts:
                 tokens = tokenizer(prompt, prepend="<|bos|>")
                 with autocast_ctx:
-                    sample, _ = engine.generate_batch(
-                        tokens, num_samples=1, max_tokens=16, temperature=0
-                    )
+                    sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
                 print0(tokenizer.decode(sample[0]))
             model.train()
 
         # save checkpoint at the end of the run (only on master process)
-        if master_process and last_step:
-            output_dirname = model_tag if model_tag else f"d{depth}"  # e.g. d12
-            checkpoint_dir = base_dir / "base_checkpoints" / output_dirname
+        if last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0):
+            assert dataloader_state_dict
             save_checkpoint(
                 checkpoint_dir,
                 step,
                 orig_model.state_dict(),
-                [
-                    opt.state_dict() for opt in optimizers
-                ],  # TODO: make sure saving across ranks is done correctly
+                [opt.state_dict() for opt in optimizers],
                 {
                     "step": step,
                     "val_bpb": val_bpb,  # loss at last step
@@ -349,7 +332,14 @@ def main(
                     "user_config": user_config,  # inputs to the training script
                     "device_batch_size": device_batch_size,
                     "max_seq_len": max_seq_len,
+                    "dataloader_state_dict": dataloader_state_dict,
+                    "loop_state": {  # all loop state (other than step) so that we can resume training
+                        "min_val_bpb": min_val_bpb,
+                        "smooth_train_loss": smooth_train_loss,
+                        "total_training_time": total_training_time,
+                    },
                 },
+                rank=ddp_rank,
             )
 
         if last_step:
@@ -367,17 +357,13 @@ def main(
             train_loss = loss.detach()  # for logging
             loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
             loss.backward()
-            x, y = next(
-                train_loader
-            )  # prefetch the next batch while the GPU is busy with forward/backward
+            x, y, dataloader_state_dict = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
         # gradient clipping (TODO possibly expertiment with)
         grad_clip_enabled = grad_clip > 0
         grad_norm = 0.0
         if grad_clip_enabled:
             grad_norm_tensor = torch.nn.utils.clip_grad_norm_(orig_model.parameters(), grad_clip)
-            grad_norm = (
-                grad_norm_tensor.item()
-            )  # GPU tensor -> CPU float (note: cpu-gpu sync point)
+            grad_norm = grad_norm_tensor.item()  # GPU tensor -> CPU float (note: cpu-gpu sync point)
         # step the optimizers
         lrm = get_lr_multiplier(step)
         for opt in optimizers:
@@ -402,9 +388,7 @@ def main(
         pct_done = 100 * step / num_iterations
         tok_per_sec = int(total_batch_size / dt)
         flops_per_sec = num_flops_per_token * total_batch_size / dt
-        promised_flops_per_sec_h100 = (
-            989e12 * ddp_world_size
-        )  # bfloat16 H100 SXM and without 2:4 sparsity
+        promised_flops_per_sec_h100 = 989e12 * ddp_world_size  # bfloat16 H100 SXM and without 2:4 sparsity
         mfu = 100 * flops_per_sec / promised_flops_per_sec_h100  # in %
         if step > 10:
             total_training_time += dt  # only count the time after the first 10 steps
@@ -432,6 +416,9 @@ def main(
             if grad_clip_enabled:
                 wandb_data["train/grad_norm"] = grad_norm
             wandb_run.log(wandb_data)
+
+    # state update
+    step += 1
 
     # print a few more stats
     print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")

@@ -494,7 +494,7 @@ class RustBPETokenizer:
 # nanochat-specific convenience functions
 
 
-def get_tokenizer():
+def get_tokenizer() -> RustBPETokenizer:
     from nanochat.common import get_base_dir
 
     base_dir = get_base_dir()
