@@ -24,8 +24,9 @@ import torch
 import torch.nn.functional as F
 
 from nanochat.checkpoint_manager import load_model
-from nanochat.common import compute_init
+from nanochat.common import compute_init, autodetect_device_type
 from nanochat.kvcache import KVCache
+from contextlib import nullcontext
 
 if TYPE_CHECKING:
     from nanochat.gpt import GPT
@@ -197,9 +198,7 @@ class Engine:
         sampled_tokens: list[int] = next_ids[:, 0].tolist()  # sampled token
 
         # 2) Replicate the KV cache for each sample/row
-        kv_length_hint = (
-            (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
-        )
+        kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
         kv_cache_decode = KVCache(
             batch_size=num_samples,
             seq_len=kv_length_hint,
@@ -225,9 +224,7 @@ class Engine:
             # Get sampled tokens - either from prefill or from forward pass
             if first_iteration:
                 # Use the tokens we already sampled from prefill
-                sampled_tokens = [
-                    sampled_tokens[0]
-                ] * num_samples  # Broadcast first token to all rows
+                sampled_tokens = [sampled_tokens[0]] * num_samples  # Broadcast first token to all rows
                 # TODO: we should sample a token for each row instead of broadcasting
                 first_iteration = False
             else:
@@ -243,9 +240,7 @@ class Engine:
             token_masks: list[int] = []
             for i, state in enumerate(row_states):
                 # Select the next token in this row
-                is_forced = (
-                    len(state.forced_tokens) > 0
-                )  # are there tokens waiting to be forced in deque?
+                is_forced = len(state.forced_tokens) > 0  # are there tokens waiting to be forced in deque?
                 token_masks.append(0 if is_forced else 1)  # mask is 0 if forced, 1 if sampled
                 next_token = state.forced_tokens.popleft() if is_forced else sampled_tokens[i]
                 token_column.append(next_token)
@@ -297,9 +292,7 @@ class Engine:
         results = [tokens.copy() for _ in range(num_samples)]
         masks = [[0] * len(tokens) for _ in range(num_samples)]
         completed = [False] * num_samples
-        for token_column, token_masks in self.generate(
-            tokens, num_samples, max_tokens, temperature, top_k, seed
-        ):
+        for token_column, token_masks in self.generate(tokens, num_samples, max_tokens, temperature, top_k, seed):
             for i, (token, mask) in enumerate(zip(token_column, token_masks)):
                 if not completed[i]:
                     if token == assistant_end or token == bos:
@@ -322,6 +315,10 @@ if __name__ == "__main__":
 
     # init compute
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init()
+    device_type = autodetect_device_type()
+    autocast_ctx = (
+        torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
+    )
     # load the model and tokenizer
     model, tokenizer, meta = load_model("base", device, phase="eval")
     bos_token_id = tokenizer.get_bos_token_id()
@@ -335,10 +332,11 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
     t0 = time.time()
     stream = model.generate(prompt_tokens, max_tokens, temperature)
-    for token in stream:
-        generated_tokens.append(token)
-        chunk = tokenizer.decode([token])
-        print(chunk, end="", flush=True)
+    with autocast_ctx:
+        for token in stream:
+            generated_tokens.append(token)
+            chunk = tokenizer.decode([token])
+            print(chunk, end="", flush=True)
     print()
     torch.cuda.synchronize()
     t1 = time.time()
@@ -350,11 +348,12 @@ if __name__ == "__main__":
     stream = engine.generate(prompt_tokens, 1, max_tokens, temperature)  # note: runs in fp32
     torch.cuda.synchronize()
     t0 = time.time()
-    for token_column, token_masks in stream:
-        token = token_column[0]  # only print out the first row
-        generated_tokens.append(token)
-        chunk = tokenizer.decode([token])
-        print(chunk, end="", flush=True)
+    with autocast_ctx:
+        for token_column, token_masks in stream:
+            token = token_column[0]  # only print out the first row
+            generated_tokens.append(token)
+            chunk = tokenizer.decode([token])
+            print(chunk, end="", flush=True)
     print()
     torch.cuda.synchronize()
     t1 = time.time()

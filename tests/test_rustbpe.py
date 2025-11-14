@@ -473,7 +473,7 @@ def enwik8_path():
         import requests
 
         response = requests.get(enwik8_url)
-        with open(enwik8_local_path_zip, "wb", encoding="utf-8") as f:
+        with open(enwik8_local_path_zip, "wb") as f:
             f.write(response.content)
         with zipfile.ZipFile(enwik8_local_path_zip, "r") as zip_ref:
             zip_ref.extractall(base_dir)
