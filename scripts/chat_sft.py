@@ -40,9 +40,7 @@ def main(
     ] = "dummy",
     source: Annotated[
         Literal["base", "mid"],
-        typer.Option(
-            help="Which checkpoint to load the model from (base model or midtrained model)"
-        ),
+        typer.Option(help="Which checkpoint to load the model from (base model or midtrained model)"),
     ] = "mid",
     model_tag: Annotated[
         str | None,
@@ -52,24 +50,16 @@ def main(
         int | None,
         typer.Option(help="Step to load the model from (base model or midtrained model)"),
     ] = None,
-    device_type: Annotated[
-        Literal["cuda", "cpu", "mps", ""], typer.Option(help="cuda|cpu|mps (empty => autodetect)")
-    ] = "",
+    device_type: Annotated[Literal["cuda", "cpu", "mps", ""], typer.Option(help="cuda|cpu|mps (empty => autodetect)")] = "",
     dtype: Annotated[str, typer.Option(help="Data type for model weights")] = "bfloat16",
     device_batch_size: Annotated[int, typer.Option(help="Max to avoid OOM")] = 4,
     num_epochs: Annotated[int, typer.Option(help="Number of epochs to train")] = 1,
     num_iterations: Annotated[
         int,
-        typer.Option(
-            help="Override number of iterations (-1 = disable, use num_epochs to derive it)"
-        ),
+        typer.Option(help="Override number of iterations (-1 = disable, use num_epochs to derive it)"),
     ] = -1,
-    target_examples_per_step: Annotated[
-        int, typer.Option(help="Target number of examples per training step")
-    ] = 32,
-    unembedding_lr: Annotated[
-        float, typer.Option(help="Learning rate for unembedding layer")
-    ] = 0.004,
+    target_examples_per_step: Annotated[int, typer.Option(help="Target number of examples per training step")] = 32,
+    unembedding_lr: Annotated[float, typer.Option(help="Learning rate for unembedding layer")] = 0.004,
     embedding_lr: Annotated[float, typer.Option(help="Learning rate for embedding layer")] = 0.2,
     matrix_lr: Annotated[float, typer.Option(help="Learning rate for matrix parameters")] = 0.02,
     weight_decay: Annotated[float, typer.Option(help="Weight decay for optimizer")] = 0.0,
@@ -77,9 +67,7 @@ def main(
     eval_every: Annotated[int, typer.Option(help="Evaluate model every N steps")] = 100,
     eval_steps: Annotated[int, typer.Option(help="Number of evaluation steps")] = 100,
     eval_metrics_every: Annotated[int, typer.Option(help="Evaluate metrics every N steps")] = 200,
-    eval_metrics_max_problems: Annotated[
-        int, typer.Option(help="Maximum number of problems for metrics evaluation")
-    ] = 1024,
+    eval_metrics_max_problems: Annotated[int, typer.Option(help="Maximum number of problems for metrics evaluation")] = 1024,
 ):
     """Finetune a base model to be a chat model.
 
@@ -97,24 +85,14 @@ def main(
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     master_process = ddp_rank == 0
     ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
-    autocast_ctx = (
-        torch.autocast(device_type=device_type, dtype=ptdtype)
-        if device_type == "cuda"
-        else nullcontext()
-    )
+    autocast_ctx = torch.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
     # wandb logging init
     use_dummy_wandb = run == "dummy" or not master_process
-    wandb_run = (
-        DummyWandb()
-        if use_dummy_wandb
-        else wandb.init(project="nanochat-sft", name=run, config=user_config, save_code=True)
-    )
+    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=run, config=user_config, save_code=True)
 
     # Load the model and tokenizer
-    model, tokenizer, meta = load_model(
-        source, device, phase="train", model_tag=model_tag, step=step
-    )
+    model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
     engine = Engine(model, tokenizer)  # will be used for inline model evaluation only
 
     # -----------------------------------------------------------------------------
@@ -126,30 +104,18 @@ def main(
             ARC(subset="ARC-Challenge", split="train"),  # 1.1K rows
             GSM8K(subset="main", split="train"),  # 8K rows
             SmolTalk(split="train", stop=10_000),  # 10K rows of smoltalk
-            CustomJSON(
-                filepath=identity_conversations_filepath
-            ),  # 1K rows of synthetic identity conversations
-            SimpleSpelling(
-                size=300, split="train"
-            ),  # 300 rows of Simple Spelling (e.g. spell the word 'apple')
-            SpellingBee(
-                size=300, split="train"
-            ),  # 300 rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
+            CustomJSON(filepath=identity_conversations_filepath),  # 1K rows of synthetic identity conversations
+            SimpleSpelling(size=300, split="train"),  # 300 rows of Simple Spelling (e.g. spell the word 'apple')
+            SpellingBee(size=300, split="train"),  # 300 rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
         ]
     )  # 2.3K + 1.1K + 8K + 10K + 1K + 0.3K + 0.3K = 23K rows
-    val_ds = SmolTalk(
-        split="test"
-    )  # general conversations, 24K rows (though we don't actually use all of it)
+    val_ds = SmolTalk(split="test")  # general conversations, 24K rows (though we don't actually use all of it)
 
     # -----------------------------------------------------------------------------
     # DataLoader
 
-    def sft_data_generator(
-        dataset: TaskMixture | Task, batch_size: int
-    ) -> Iterable[tuple[torch.Tensor, torch.Tensor]]:
-        pad_token_id = tokenizer.encode_special(
-            "<|assistant_end|>"
-        )  # use <|assistant_end|> as the pad token is ok, these positions are masked in the loss
+    def sft_data_generator(dataset: TaskMixture | Task, batch_size: int) -> Iterable[tuple[torch.Tensor, torch.Tensor]]:
+        pad_token_id = tokenizer.encode_special("<|assistant_end|>")  # use <|assistant_end|> as the pad token is ok, these positions are masked in the loss
 
         # prepares a list of tokenized conversations into a batch and yields
         def collate_and_yield(
@@ -188,9 +154,7 @@ def main(
     print0(f"Target examples per step: {target_examples_per_step}")
     print0(f"Device batch size: {device_batch_size}")
     print0(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}")
-    assert target_examples_per_step % examples_per_step == 0, (
-        "Target examples per step must be divisible by examples per step"
-    )
+    assert target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
     grad_accum_steps = target_examples_per_step // examples_per_step
     assert grad_accum_steps > 0
     print0(f"=> Setting grad accum steps: {grad_accum_steps}")
@@ -218,9 +182,7 @@ def main(
     for opt in optimizers:
         for group in opt.param_groups:
             group["lr"] = group["lr"] * init_lr_frac
-            group["initial_lr"] = group[
-                "lr"
-            ]  # save the initial learning so we can decay easily later
+            group["initial_lr"] = group["lr"]  # save the initial learning so we can decay easily later
 
     # -----------------------------------------------------------------------------
     # Training loop
@@ -295,9 +257,7 @@ def main(
             break
 
         # evaluate the gradient
-        num_tokens = torch.tensor(
-            0, device=device
-        )  # the number of "active" tokens of supervision seen
+        num_tokens = torch.tensor(0, device=device)  # the number of "active" tokens of supervision seen
         for _ in range(grad_accum_steps):
             train_inputs, train_targets = next(train_iter)
             with autocast_ctx:
@@ -323,9 +283,7 @@ def main(
         # logging
         train_loss_item = train_loss.item()  # type: ignore
         num_tokens_item = num_tokens.item()
-        print0(
-            f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}"
-        )
+        print0(f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
         wandb_run.log(
             {
                 "step": step,

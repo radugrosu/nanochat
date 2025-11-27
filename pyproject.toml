@@ -17,19 +17,18 @@ description = "the minimal full-stack ChatGPT clone"
 name = "nanochat"
 readme = "README.md"
 requires-python = ">=3.13"
-version = "0.1.0"
+version = "0.1.1"
 
 [build-system]
 build-backend = "maturin"
 requires = ["maturin>=1.9,<2.0"]
 
-[tool.pyright]
-reportConstantRedefinition = false
 
 [tool.uv.sources]
 torch = [
-  {index = "pytorch-cpu", extra = "cpu"},
-  {index = "pytorch-cu128", extra = 'gpu'},
+  { index = "pytorch-cpu", extra = "cpu" },
+  { index = "pytorch-cu126", extra = 'sm61' }, # for sm61 support
+  { index = "pytorch-cu128", extra = 'gpu' },
 ]
 
 [tool.maturin]
@@ -41,16 +40,10 @@ python-packages = ["nanochat"]
 python-source = "."
 
 [dependency-groups]
-dev = [
-  "ipython>=9.7.0",
-  "maturin>=1.10.1",
-  "pytest>=9.0.1",
-]
+dev = ["ipython>=9.7.0", "maturin>=1.10.1", "pytest>=9.0.1"]
 
 [tool.pytest.ini_options]
-markers = [
-  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-]
+markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 python_classes = ["Test*"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
@@ -66,24 +59,24 @@ explicit = true
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 
+[[tool.uv.index]]
+explicit = true
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+
 [project.optional-dependencies]
-cpu = [
-  "torch>=2.9.0",
-]
-gpu = [
-  "torch>=2.9.0",
-]
+cpu = ["torch>=2.9.0"]
+gpu = ["torch>=2.9.0"]
+sm61 = ["torch>=2.9.0"]
 
 [tool.uv]
-conflicts = [
-  [
-    {extra = "cpu"},
-    {extra = "gpu"},
-  ],
-]
+conflicts = [[{ extra = "cpu" }, { extra = "gpu" }, { extra = "sm61" }]]
 
 [tool.ruff]
 line-length = 120
 
 [tool.ruff.lint.per-file-ignores]
 "**/scripts/*.py" = ["E501"] # Ignore line length for scripts
+
+[tool.pyright]
+reportConstantRedefinition = false

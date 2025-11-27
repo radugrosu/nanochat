@@ -326,7 +326,7 @@ class GPT(nn.Module):
     ):
         _B, T = idx.size()
 
-        # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim))
+        # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim // 2))
         assert T <= self.cos.size(1), (
             f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
         )
