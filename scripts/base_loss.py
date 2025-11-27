@@ -1,11 +1,8 @@
 from contextlib import nullcontext
-from typing import Annotated as A
 from typing import Literal, cast
 
 import torch
 import typer
-from typer import Option
-
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import autodetect_device_type, compute_cleanup, compute_init, print0
 from nanochat.dataloader import tokenizing_distributed_data_loader
@@ -13,18 +10,15 @@ from nanochat.engine import Engine
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.report import get_report
 from nanochat.tokenizer import get_token_bytes
+from scripts.common import opt
 
 
 def main(
-    device_batch_size: A[int, Option(help="Batch size per device")] = 32,
-    split_tokens: A[int, Option(help="Number of tokens to evaluate per split")] = 20 * 524288,
-    model_tag: A[
-        str | None, Option(help="Optional model tag for the output directory name")
-    ] = None,
-    model_step: A[
-        int | None, Option(help="Optional model step for the output directory name")
-    ] = None,
-    device_type: A[str, Option(help="cuda|cpu|mps (empty => autodetect)")] = "",
+    device_batch_size: int = opt(32, "Batch size per device"),
+    split_tokens: int = opt(20 * 524288, "Number of tokens to evaluate per split"),
+    model_tag: str = opt(None, "Optional model tag for the output directory name"),
+    model_step: int = opt(None, "Optional model step for the output directory name"),
+    device_type: str = opt("", "cuda|cpu|mps (empty => autodetect)"),
 ):
     """Evaluate and sample model.
 
@@ -39,16 +33,10 @@ def main(
     # Load the base model and the tokenizer
     device_type = autodetect_device_type() if device_type == "" else device_type
     device_type = cast(Literal["cuda", "mps", "cpu"], device_type)
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-    model, tokenizer, meta = load_model(
-        "base", device, phase="eval", model_tag=model_tag, step=model_step
-    )
+    _, ddp_rank, _, ddp_world_size, device = compute_init(device_type)
+    model, tokenizer, meta = load_model("base", device, phase="eval", model_tag=model_tag, step=model_step)
     sequence_len = meta["model_config"]["sequence_len"]  # could be arbitrary really
-    autocast_ctx = (
-        torch.autocast(device_type=device_type, dtype=torch.bfloat16)
-        if device_type == "cuda"
-        else nullcontext()
-    )
+    autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 
     # Evaluate the loss on each split
     tokens_per_step = device_batch_size * sequence_len * ddp_world_size
@@ -58,9 +46,7 @@ def main(
     bpb_results = {}
     splits: list[Literal["train", "val"]] = ["train", "val"]
     for split_name in splits:
-        loader = tokenizing_distributed_data_loader(
-            device_batch_size, sequence_len, split_name, device=device
-        )
+        loader = tokenizing_distributed_data_loader(device_batch_size, sequence_len, split_name, device=device)
         with autocast_ctx:
             bpb = evaluate_bpb(model, loader, steps, token_bytes)
         print0(f"{split_name} bpb: {bpb:.4f}")
@@ -82,9 +68,7 @@ def main(
         for prompt in prompts:
             tokens = tokenizer(prompt, prepend="<|bos|>")
             with autocast_ctx:
-                sample, _ = engine.generate_batch(
-                    tokens, num_samples=1, max_tokens=16, temperature=0
-                )
+                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
             sample_str = tokenizer.decode(sample[0])
             print0(sample_str)
             samples.append(sample_str)

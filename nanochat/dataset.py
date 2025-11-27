@@ -1,5 +1,5 @@
-"""
-The base/pretraining dataset is a set of parquet files.
+"""The base/pretraining dataset is a set of parquet files.
+
 This file contains utilities for:
 - iterating over the parquet files and yielding documents from it
 - download the files on demand if they are not on disk
@@ -7,11 +7,11 @@ This file contains utilities for:
 For details of how the dataset was prepared, see `repackage_data_reference.py`.
 """
 
-import argparse
+import typer
 import time
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Any
 
 import pyarrow.parquet as pq
 import requests
@@ -107,32 +107,32 @@ def download_single_file(index: int) -> bool:
     return False
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Download FineWeb-Edu 100BT dataset shards")
-    parser.add_argument(
-        "-n",
-        "--num-files",
-        type=int,
-        default=-1,
-        help="Number of shards to download (default: -1), -1 = disable",
-    )
-    parser.add_argument(
-        "-w",
-        "--num-workers",
-        type=int,
-        default=4,
-        help="Number of parallel download workers (default: 4)",
-    )
-    args = parser.parse_args()
+def opt(default: Any, msg: str):
+    return typer.Option(default, help=msg)
 
-    num = MAX_SHARD + 1 if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
+
+def main(
+    num_files: int = opt(-1, "Number of shards to download (default: -1, -1 = all available)"),
+    num_workers: int = opt(4, "Number of parallel download workers"),
+):
+    """Download FineWeb-Edu 100BT dataset shards")"""
+    # Logic adapted from original script
+    # Note: Ensure MAX_SHARD, DATA_DIR, and download_single_file are defined globally
+
+    num = MAX_SHARD + 1 if num_files == -1 else min(num_files, MAX_SHARD + 1)
     ids_to_download = list(range(num))
-    print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
+
+    print(f"Downloading {len(ids_to_download)} shards using {num_workers} workers...")
     print(f"Target directory: {DATA_DIR}")
     print()
-    with Pool(processes=args.num_workers) as pool:
+
+    with Pool(processes=num_workers) as pool:
         results = pool.map(download_single_file, ids_to_download)
 
     # Report results
     successful = sum(1 for success in results if success)
     print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")
+
+
+if __name__ == "__main__":
+    typer.run(main)

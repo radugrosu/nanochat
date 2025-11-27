@@ -1,17 +1,16 @@
 import itertools
-from typing import Annotated, Literal
+from typing import Literal
 
 import torch
 import torch.distributed as dist
 import typer
 import wandb
-
 from nanochat.checkpoint_manager import load_model, save_checkpoint
 from nanochat.common import DummyWandb, compute_cleanup, compute_init, get_base_dir, print0
 from nanochat.engine import Engine
 from nanochat.report import get_report
 from nanochat.tokenizer import RustBPETokenizer
-from scripts.common import config_from_context
+from scripts.common import config_from_context, opt
 from tasks.common import Task
 from tasks.gsm8k import GSM8K
 
@@ -67,41 +66,29 @@ def run_gsm8k_eval(
 
 def main(
     ctx: typer.Context,
-    run: Annotated[str, typer.Option(help="wandb run name")] = "dummy",
-    source: Annotated[Literal["mid", "sft"], typer.Option(help="Source of the model")] = "sft",
-    dtype: Annotated[str, typer.Option(help="Data type for model weights")] = "bfloat16",
-    device_batch_size: Annotated[
-        int, typer.Option(help="No forward pass will go above this to not OOM")
-    ] = 8,
-    examples_per_step: Annotated[
-        int,
-        typer.Option(
-            help="In total and across all ranks (note: examples, not samples/completions!)"
-        ),
-    ] = 16,
-    num_samples: Annotated[
-        int, typer.Option(help="Number of samples per example (/question)")
-    ] = 16,
-    max_new_tokens: Annotated[
-        int, typer.Option(help="Maximum number of new tokens to generate")
-    ] = 256,
-    temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 1.0,
-    top_k: Annotated[int, typer.Option(help="Top-k sampling parameter")] = 50,
-    unembedding_lr: Annotated[
-        float, typer.Option(help="Learning rate for unembedding layer")
-    ] = 0.004,
-    embedding_lr: Annotated[float, typer.Option(help="Learning rate for embedding layer")] = 0.2,
-    matrix_lr: Annotated[float, typer.Option(help="Learning rate for matrix parameters")] = 0.02,
-    weight_decay: Annotated[float, typer.Option(help="Weight decay for optimizer")] = 0.0,
-    init_lr_frac: Annotated[float, typer.Option(help="Initial learning rate fraction")] = 0.05,
-    num_epochs: Annotated[int, typer.Option(help="How many epochs of gsm8k to train on")] = 1,
-    save_every: Annotated[int, typer.Option(help="Every how many steps to save the model")] = 60,
-    eval_every: Annotated[
-        int, typer.Option(help="Every how many steps to evaluate the model for val pass@k")
-    ] = 60,
-    eval_examples: Annotated[
-        int, typer.Option(help="Number of examples used for evaluating pass@k")
-    ] = 400,
+    run: str = opt("dummy", "wandb run name"),
+    # Model & Runtime
+    source: Literal["mid", "sft"] = opt("sft", "Source of the model"),
+    dtype: str = opt("bfloat16", "Data type for model weights"),
+    # Training Configuration
+    device_batch_size: int = opt(8, "No forward pass will go above this to not OOM"),
+    examples_per_step: int = opt(16, "In total and across all ranks (note: examples, not samples/completions!)"),
+    num_epochs: int = opt(1, "How many epochs of gsm8k to train on"),
+    save_every: int = opt(60, "Every how many steps to save the model"),
+    # Sampling / Generation
+    num_samples: int = opt(16, "Number of samples per example (/question)"),
+    max_new_tokens: int = opt(256, "Maximum number of new tokens to generate"),
+    temperature: float = opt(1.0, "Sampling temperature"),
+    top_k: int = opt(50, "Top-k sampling parameter"),
+    # Optimization
+    unembedding_lr: float = opt(0.004, "Learning rate for unembedding layer"),
+    embedding_lr: float = opt(0.2, "Learning rate for embedding layer"),
+    matrix_lr: float = opt(0.02, "Learning rate for matrix parameters"),
+    weight_decay: float = opt(0.0, "Weight decay for optimizer"),
+    init_lr_frac: float = opt(0.05, "Initial learning rate fraction"),
+    # Evaluation
+    eval_every: int = opt(60, "Every how many steps to evaluate the model for val pass@k"),
+    eval_examples: int = opt(400, "Number of examples used for evaluating pass@k"),
 ):
     """Reinforcement learning on GSM8K via "GRPO".
 
@@ -124,17 +111,11 @@ def main(
     # Init compute/precision
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init()
     master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
-    autocast_ctx = torch.autocast(
-        device_type="cuda", dtype=torch.float32 if dtype == "float32" else torch.bfloat16
-    )
+    autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float32 if dtype == "float32" else torch.bfloat16)
 
     # wandb logging init
     use_dummy_wandb = run == "dummy" or not master_process
-    wandb_run = (
-        DummyWandb()
-        if use_dummy_wandb
-        else wandb.init(project="nanochat-rl", name=run, config=user_config)
-    )
+    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=run, config=user_config)
 
     # Init model and tokenizer
     model, tokenizer, meta = load_model(source, device, phase="eval")
@@ -152,9 +133,7 @@ def main(
     def get_batch():
         # ok to use this token, it's only for padding and isn't used in the loss.
         assistant_end = tokenizer.encode_special("<|assistant_end|>")
-        rank_indices = range(
-            ddp_rank, len(train_tasks), ddp_world_size
-        )  # each rank is responsible for different examples in the training data
+        rank_indices = range(ddp_rank, len(train_tasks), ddp_world_size)  # each rank is responsible for different examples in the training data
         for example_idx in itertools.cycle(rank_indices):
             # First get the full conversation of both user and assistant messages
             conversation = train_tasks[example_idx]
@@ -170,9 +149,7 @@ def main(
             masks: list[list[int]] = []
             num_sampling_steps = num_samples // device_batch_size  # go sequentially to prevent OOMs
             for sampling_step in range(num_sampling_steps):
-                seed = (
-                    hash((step, example_idx, sampling_step)) & 0x7FFFFFFF
-                )  # positive half of int32
+                seed = hash((step, example_idx, sampling_step)) & 0x7FFFFFFF  # positive half of int32
                 with autocast_ctx:
                     generated_token_sequences_batch, masks_batch = engine.generate_batch(
                         tokens,
@@ -198,9 +175,7 @@ def main(
 
             # Pad the sequences so that their lengths (in time) match
             max_length = max(len(seq) for seq in generated_token_sequences)
-            padded_generated_token_sequences = [
-                seq + [assistant_end] * (max_length - len(seq)) for seq in generated_token_sequences
-            ]
+            padded_generated_token_sequences = [seq + [assistant_end] * (max_length - len(seq)) for seq in generated_token_sequences]
             padded_masks = [mask + [0] * (max_length - len(mask)) for mask in masks]
             # Stack up the sequences and masks into PyTorch tensors
             ids = torch.tensor(padded_generated_token_sequences, dtype=torch.long, device=device)
@@ -208,9 +183,7 @@ def main(
             # Generate autoregressive inputs and targets to the Transformer
             inputs = ids[:, :-1]
             targets = ids[:, 1:].clone()  # clone to avoid in-place modification:
-            targets[
-                mask_ids[:, 1:] == 0
-            ] = -1  # <-- inplace modification right here. -1 is the ignore index
+            targets[mask_ids[:, 1:] == 0] = -1  # <-- inplace modification right here. -1 is the ignore index
             # NOTE also that the Engine returns mask=0 for BOTH the prompt tokens AND the tool use tokens.
             # So we will (correctly) end up not training on the prompt tokens, or the tool use forced tokens.
             rewards = torch.tensor(reward_list, dtype=torch.float, device=device)
@@ -231,12 +204,10 @@ def main(
     )
 
     # Set the initial learning rate as a fraction of the base learning rate
-    for opt in optimizers:
-        for group in opt.param_groups:
+    for optimizer in optimizers:
+        for group in optimizer.param_groups:
             group["lr"] = group["lr"] * init_lr_frac
-            group["initial_lr"] = group[
-                "lr"
-            ]  # save the initial learning so we can decay easily later
+            group["initial_lr"] = group["lr"]  # save the initial learning so we can decay easily later
 
     # Learning rate scheduler: simple rampdown to zero over num_steps
     def get_lr_multiplier(it: int):
@@ -244,12 +215,8 @@ def main(
         return lrm
 
     # Calculate the number of examples each rank handles to achive the desired examples_per_step
-    print0(
-        f"Total sequences per step: {examples_per_step * num_samples}"
-    )  # total batch size in sequences/step
-    assert examples_per_step % ddp_world_size == 0, (
-        "Desired examples per step must be divisible by the number of ranks"
-    )
+    print0(f"Total sequences per step: {examples_per_step * num_samples}")  # total batch size in sequences/step
+    assert examples_per_step % ddp_world_size == 0, "Desired examples per step must be divisible by the number of ranks"
     examples_per_rank = examples_per_step // ddp_world_size  # per GPU
     print0(f"Calculated examples per rank: {examples_per_rank}")
 
@@ -259,9 +226,7 @@ def main(
         # Evaluate the model once in a while and log to wandb
         if step % eval_every == 0:
             model.eval()
-            passk = torch.zeros(
-                device_batch_size, device=device
-            )  # pass@k for k=1..device_batch_size
+            passk = torch.zeros(device_batch_size, device=device)  # pass@k for k=1..device_batch_size
             with autocast_ctx:
                 records_iter = run_gsm8k_eval(
                     val_tasks,
@@ -282,9 +247,7 @@ def main(
                 dist.all_reduce(num_records, op=dist.ReduceOp.SUM)
                 dist.all_reduce(passk, op=dist.ReduceOp.SUM)
             passk = passk / num_records.item()  # normalize by the total number of records
-            print_passk = [
-                f"Pass@{k}: {passk[k - 1].item():.4f}" for k in range(1, device_batch_size + 1)
-            ]
+            print_passk = [f"Pass@{k}: {passk[k - 1].item():.4f}" for k in range(1, device_batch_size + 1)]
             print0(f"Step {step} | {', '.join(print_passk)}")
             log_passk = {f"pass@{k}": passk[k - 1].item() for k in range(1, device_batch_size + 1)}
             wandb_run.log(
@@ -299,9 +262,7 @@ def main(
         sequence_lengths = []
         for example_step in range(examples_per_rank):
             # Get one batch corresponding to one example in the training dataset
-            sequences_all, inputs_all, targets_all, rewards_all, advantages_all = next(
-                batch_iterator
-            )
+            sequences_all, inputs_all, targets_all, rewards_all, advantages_all = next(batch_iterator)
             # Evaluate the loss and gradients
             model.train()  # ensure the model is in train mode
             # We need one more loop because we can never exceed the device_batch_size
@@ -316,9 +277,7 @@ def main(
                 advantages = advantages_all[b0:b1]
                 # Calculate log probabilities. Note that the loss calculates NLL = -logp, so we negate
                 with autocast_ctx:
-                    logp: torch.Tensor = -model(inputs, targets, loss_reduction="none").view_as(
-                        inputs
-                    )  # (B, T)
+                    logp: torch.Tensor = -model(inputs, targets, loss_reduction="none").view_as(inputs)  # (B, T)
                 # Calculate the PG objective. Note that ignore_index=-1 ensures that invalid tokens have loss 0.
                 pg_obj = (logp * advantages.unsqueeze(-1)).sum()
                 # normalize by the number of valid tokens, number of passes, and examples_per_rank
@@ -328,9 +287,7 @@ def main(
                 # Finally, formulate the loss that we want to minimize (instead of objective we wish to maximize)
                 loss = -pg_obj
                 loss.backward()
-                print0(
-                    f"Step {step}/{num_steps} | Example step {example_step} | Pass {pass_idx} | loss: {loss.item():.6f} | Average reward: {rewards.mean().item()}"
-                )
+                print0(f"Step {step}/{num_steps} | Example step {example_step} | Pass {pass_idx} | loss: {loss.item():.6f} | Average reward: {rewards.mean().item()}")
             # For logging
             rewards_list.append(rewards_all.mean().item())
             sequence_lengths.extend(len(seq) for seq in sequences_all)
@@ -340,16 +297,12 @@ def main(
         mean_sequence_length = sum(sequence_lengths) / len(sequence_lengths)
         if ddp:  # aggregate across ranks
             mean_reward_tensor = torch.tensor(mean_reward, dtype=torch.float, device=device)
-            mean_sequence_length_tensor = torch.tensor(
-                mean_sequence_length, dtype=torch.float, device=device
-            )
+            mean_sequence_length_tensor = torch.tensor(mean_sequence_length, dtype=torch.float, device=device)
             dist.all_reduce(mean_reward_tensor, op=dist.ReduceOp.AVG)
             dist.all_reduce(mean_sequence_length_tensor, op=dist.ReduceOp.AVG)
             mean_reward = mean_reward_tensor.item()
             mean_sequence_length = mean_sequence_length_tensor.item()
-        print0(
-            f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f}"
-        )
+        print0(f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f}")
         wandb_run.log(
             {
                 "step": step,
@@ -360,11 +313,11 @@ def main(
 
         # Update the model parameters
         lrm = get_lr_multiplier(step)
-        for opt in optimizers:  # first set the learning rate
-            for group in opt.param_groups:
+        for optimizer in optimizers:  # first set the learning rate
+            for group in optimizer.param_groups:
                 group["lr"] = group["initial_lr"] * lrm
-        for opt in optimizers:  # then step the optimizers
-            opt.step()
+        for optimizer in optimizers:  # then step the optimizers
+            optimizer.step()
         model.zero_grad(set_to_none=True)
         wandb_run.log(
             {
@@ -379,9 +332,7 @@ def main(
             depth = model.config.n_layer
             model_tag = f"d{depth}"  # base the model tag on the depth of the base model
             checkpoint_dir = base_dir / "chatrl_checkpoints" / model_tag
-            model_config_kwargs = (
-                model.config.__dict__
-            )  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
+            model_config_kwargs = model.config.__dict__  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
             save_checkpoint(
                 checkpoint_dir,
                 step,

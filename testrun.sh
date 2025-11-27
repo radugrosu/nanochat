@@ -1,37 +1,31 @@
 #!/bin/bash
-
+set -e
 # WANDB_RUN=testrun screen -L -Logfile testrun.log -S testrun bash testrun.sh
 export _TYPER_STANDARD_TRACEBACK=1
-unset $CONDA_PREFIX
 if [ -z "$WANDB_API_KEY" ]; then
-    if [ -f ".env" ]; then
-            echo "Sourcing .env file..."
-            source .env
-            echo "WANDB_API_KEY after sourcing: ${WANDB_API_KEY:0:10}..."  # Show first 10 chars
-    else
-        echo "No .env file found"
-    fi
-fi
-
-if [ -z "$WANDB_API_KEY" ]; then
-    echo "Error: WANDB_API_KEY environment variable is not set"
-    exit 1
+  if [ -f ".env" ]; then
+    echo "Sourcing .env file..."
+    source .env
+    echo "WANDB_API_KEY after sourcing: ${WANDB_API_KEY:0:10}..." # Show first 10 chars
+  else
+    echo "No .env file found"
+  fi
 fi
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
-mkdir -p $NANOCHAT_BASE_DIR
+mkdir -p "$NANOCHAT_BASE_DIR"
 
 # -----------------------------------------------------------------------------
 # Python venv setup with uv
 
 # install uv (if not already installed)
-command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+command -v uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 # create a .venv local virtual environment (if it doesn't exist)
 [ -d ".venv" ] || uv venv
 # install the repo dependencies
-uv sync
+uv sync --extra sm61
 # activate venv so that `python` uses the project's venv instead of system python
 source .venv/bin/activate
 
@@ -43,8 +37,8 @@ source .venv/bin/activate
 # 2) Set the WANDB_RUN environment variable when running this script, e.g.:
 #    `WANDB_RUN=d26 bash speedrun.sh`
 if [ -z "$WANDB_RUN" ]; then
-    # by default use "dummy" : it's handled as a special case, skips logging to wandb
-    WANDB_RUN=dummy
+  # by default use "dummy" : it's handled as a special case, skips logging to wandb
+  WANDB_RUN=dummy
 fi
 
 # -----------------------------------------------------------------------------
@@ -55,23 +49,18 @@ python -m nanochat.report reset
 
 # -----------------------------------------------------------------------------
 # Tokenizer
-
-# Install Rust / Cargo
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-
 # Build the rustbpe Tokenizer
 uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
 
 # each data shard is ~250M chars
 # each shard is ~100MB of text (compressed)
-python -m nanochat.dataset -n 1
+python -m nanochat.dataset --num-files 1
 # Immediately also kick off downloading more shards in the background while tokenizer trains
 # See comment below for why 24 is the right number here
-python -m nanochat.dataset -n 24 &
+python -m nanochat.dataset --num-files 24 &
 DATASET_DOWNLOAD_PID=$!
 # train the tokenizer with vocab size 2**16 = 65536 on ~2B characters of data
-python -m scripts.tok_train --max_chars=2000000000
+python -m scripts.tok_train --max-chars=2000000000
 # evaluate the tokenizer (report compression ratio etc.)
 python -m scripts.tok_eval
 
@@ -87,26 +76,30 @@ python -m scripts.tok_eval
 echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
+NPN=1
+DEPTH=1
+BSZ=2
+
 # pretrain the d2 model
-torchrun --standalone --nproc_per_node=1 -m scripts.base_train -- --depth=2 --run=$WANDB_RUN
+torchrun --standalone --nproc-per-node=$NPN -m scripts.base_train -- --depth=$DEPTH --run="$WANDB_RUN" --device-batch-size=$BSZ
 # evaluate the model on a larger chunk of train/val data and draw some samples
-torchrun --standalone --nproc_per_node=1 -m scripts.base_loss
+torchrun --standalone --nproc-per-node=$NPN -m scripts.base_loss -- --device-batch-size=$BSZ
 # evaluate the model on CORE tasks
-torchrun --standalone --nproc_per_node=1 -m scripts.base_eval
+torchrun --standalone --nproc-per-node=$NPN -m scripts.base_eval
 
 # -----------------------------------------------------------------------------
 # Midtraining (teach the model conversation special tokens, tool use, multiple choice)
 
 # run midtraining and eval the model
-torchrun --standalone --nproc_per_node=1 -m scripts.mid_train -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=1 -m scripts.chat_eval -- -i mid
+torchrun --standalone --nproc-per-node=$NPN -m scripts.mid_train -- --run="$WANDB_RUN" --device-batch-size=$BSZ
+torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- -i mid
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
 # train sft and re-eval right away (should see a small bump)
-torchrun --standalone --nproc_per_node=1 -m scripts.chat_sft -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=1 -m scripts.chat_eval -- -i sft
+torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_sft -- --run="$WANDB_RUN" --device-batch-size=$BSZ
+torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- -i sft --batch-size=2
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"
@@ -119,9 +112,9 @@ torchrun --standalone --nproc_per_node=1 -m scripts.chat_eval -- -i sft
 # (optional)
 
 # run reinforcement learning
-torchrun --standalone --nproc_per_node=1 -m scripts.chat_rl -- --run=$WANDB_RUN
+torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_rl -- --run="$WANDB_RUN" --device-batch-size=$BSZ
 # eval the RL model only on GSM8K
-torchrun --standalone --nproc_per_node=1 -m scripts.chat_eval -- -i rl -a GSM8K
+torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- -i rl -a GSM8K --batch-size=2
 
 # -----------------------------------------------------------------------------
 # Generate the full report by putting together all the sections

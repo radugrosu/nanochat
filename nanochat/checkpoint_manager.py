@@ -31,7 +31,7 @@ def save_checkpoint(
     model_data: dict[str, Any],
     optimizer_data: list[dict[str, Any]] | None,
     meta_data: dict[str, Any],
-    rank: int,
+    rank: int = 0,
 ):
     checkpoint_dir = Path(checkpoint_dir)
     if int(os.environ.get("RANK", 0)) == 0:

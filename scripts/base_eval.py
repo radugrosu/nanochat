@@ -9,7 +9,7 @@ import time
 import zipfile
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import typer
@@ -28,6 +28,7 @@ from nanochat.common import (
 from nanochat.core_eval import evaluate_task
 from nanochat.report import get_report
 from nanochat.tokenizer import HuggingFaceTokenizer
+from scripts.common import opt
 
 if TYPE_CHECKING:
     from nanochat.gpt import GPT
@@ -144,7 +145,7 @@ def evaluate_model(
 
         # Load data for this task
         data_path = data_base_path / task["dataset_uri"]
-        with open(data_path, "r", encoding='utf-8') as f:
+        with open(data_path, "r", encoding="utf-8") as f:
             data: list[dict[str, str]] = [json.loads(line.strip()) for line in f]
 
         # shuffle the data because in many cases it appears ordered but we want
@@ -162,9 +163,7 @@ def evaluate_model(
         centered_result = (accuracy - 0.01 * random_baseline) / (1.0 - 0.01 * random_baseline)
         centered_results[label] = centered_result
         end_time = time.time()
-        print0(
-            f"accuracy: {accuracy:.4f} | centered: {centered_result:.4f} | time: {end_time - start_time:.2f}s"
-        )
+        print0(f"accuracy: {accuracy:.4f} | centered: {centered_result:.4f} | time: {end_time - start_time:.2f}s")
 
     core_metric = sum(centered_results.values()) / len(centered_results)
     out = {"results": results, "centered_results": centered_results, "core_metric": core_metric}
@@ -173,10 +172,8 @@ def evaluate_model(
 
 # -----------------------------------------------------------------------------
 def main(
-    hf_path: Annotated[str | None, typer.Option(help="HF model path to evaluate")] = None,
-    max_per_task: Annotated[
-        int, typer.Option(help="Max. num. of examples per task to eval (-1 = disable)")
-    ] = -1,
+    hf_path: str | None = opt(None, "HF model path to evaluate"),
+    max_per_task: int = opt(-1, "Max. num. of examples per task to eval (-1 = disable)"),
 ):
     """Evaluate the CORE metric for a given model.
 
@@ -190,7 +187,7 @@ def main(
     """
     # distributed / precision setup
     device_type = autodetect_device_type()
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    _, ddp_rank, _, _, device = compute_init(device_type)
     autocast_ctx = (
         torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16)  # type: ignore
         if device_type == "cuda"
@@ -229,7 +226,7 @@ def main(
         results = out["results"]
         centered_results = out["centered_results"]
         core_metric = out["core_metric"]
-        with open(output_csv_path, "w", encoding='utf-8', newline="") as f:
+        with open(output_csv_path, "w", encoding="utf-8", newline="") as f:
             f.write(f"{'Task':<35}, {'Accuracy':<10}, {'Centered':<10}\n")
             for label in results:
                 f.write(f"{label:<35}, {results[label]:<10.6f}, {centered_results[label]:<10.6f}\n")

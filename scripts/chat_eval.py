@@ -1,11 +1,10 @@
 from contextlib import nullcontext
 from functools import partial
-from typing import Annotated, Literal
+from typing import Literal
 
 import torch
 import torch.distributed as dist
 import typer
-
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import (
     autodetect_device_type,
@@ -17,7 +16,7 @@ from nanochat.common import (
 from nanochat.engine import Engine
 from nanochat.gpt import GPT
 from nanochat.tokenizer import RustBPETokenizer
-from scripts.common import config_from_context
+from scripts.common import config_from_context, opt
 from tasks.arc import ARC
 from tasks.common import Task
 from tasks.gsm8k import GSM8K
@@ -130,13 +129,9 @@ def run_categorical_eval(
 
         # Prepare the batch of problems. They might all be of different length, so we pad/collate them.
         conversations = [task_object[ii] for ii in range(i0, i1)]
-        prompt_ids = [
-            tokenizer.render_for_completion(conversation) for conversation in conversations
-        ]  # TODO: remake the way this works
+        prompt_ids = [tokenizer.render_for_completion(conversation) for conversation in conversations]  # TODO: remake the way this works
         max_length = max(len(ids) for ids in prompt_ids)
-        answer_time_positions = [
-            len(ids) - 1 for ids in prompt_ids
-        ]  # where the last token is (and the predicted answer)
+        answer_time_positions = [len(ids) - 1 for ids in prompt_ids]  # where the last token is (and the predicted answer)
         padded_prompt_ids = [ids + [bos] * (max_length - len(ids)) for ids in prompt_ids]
         prompt_ids = torch.tensor(padded_prompt_ids, dtype=torch.long, device=device)
 
@@ -222,9 +217,7 @@ def run_chat_eval(
             max_problems=max_problems,
         )
     elif task_object.eval_type == "categorical":
-        acc = run_categorical_eval(
-            task_object, tokenizer, model, batch_size, max_problems=max_problems
-        )
+        acc = run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=max_problems)
     else:
         raise ValueError(f"Unsupported task evaluation type: {task_object.eval_type}")
     return acc
@@ -233,36 +226,22 @@ def run_chat_eval(
 # -----------------------------------------------------------------------------
 def main(
     ctx: typer.Context,
-    source: Annotated[str, typer.Option("-i", "--source", help="Source of the model: sft|mid|rl")],
-    task_name: Annotated[
-        str | None,
-        typer.Option(
-            "-a",
-            "--task-name",
-            help="Task name. Default = all tasks. Use | to split multiple tasks.",
-        ),
-    ] = None,
-    dtype: Annotated[Literal["float32", "bfloat16"], typer.Option("-d", "--dtype")] = "bfloat16",
-    temperature: Annotated[float, typer.Option("-t", "--temperature")] = 0.0,
-    max_new_tokens: Annotated[int, typer.Option("-m", "--max-new-tokens")] = 512,
-    num_samples: Annotated[int, typer.Option("-n", "--num-samples")] = 1,
-    top_k: Annotated[int, typer.Option("-k", "--top-k")] = 50,
-    batch_size: Annotated[
-        int, typer.Option("-b", "--batch-size", help="Batch size for categorical evaluation")
-    ] = 8,
-    model_tag: Annotated[
-        str | None, typer.Option("-g", "--model-tag", help="Model tag to load")
-    ] = None,
-    step: Annotated[int | None, typer.Option("-s", "--step", help="Step to load")] = None,
-    max_problems: Annotated[
-        int | None, typer.Option("-x", "--max-problems", help="Max problems to evaluate")
-    ] = None,
-    device_type: Annotated[
-        Literal["cuda", "cpu", "mps", ""],
-        typer.Option(
-            "--device-type", help="Device type for evaluation: cuda|cpu|mps. empty => autodetect"
-        ),
-    ] = "",
+    # Model & Task
+    source: str = opt("sft", "Source of the model: sft|mid|rl"),
+    task_name: str | None = opt(None, "Task name. Default = all tasks. Use | to split multiple tasks."),
+    model_tag: str | None = opt(None, "Model tag to load"),
+    step: int | None = opt(None, "Step to load"),
+    # Runtime
+    device_type: Literal["cuda", "cpu", "mps", ""] = opt("", "Device type for evaluation: cuda|cpu|mps. empty => autodetect"),
+    dtype: Literal["float32", "bfloat16"] = opt("bfloat16", "Data type"),
+    batch_size: int = opt(8, "Batch size for categorical evaluation"),
+    # Sampling / Generation
+    temperature: float = opt(0.0, "Sampling temperature"),
+    max_new_tokens: int = opt(512, "Maximum number of new tokens"),
+    num_samples: int = opt(1, "Number of samples"),
+    top_k: int = opt(50, "Top-k sampling parameter"),
+    # Evaluation Limits
+    max_problems: int | None = opt(None, "Max problems to evaluate"),
 ):
     """Evaluate the Chat model.
 
@@ -277,15 +256,9 @@ def main(
     device_type = autodetect_device_type() if device_type == "" else device_type
     *_, device = compute_init(device_type)
     ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
-    autocast_ctx = (
-        torch.autocast(device_type=device_type, dtype=ptdtype)
-        if device_type == "cuda"
-        else nullcontext()
-    )
+    autocast_ctx = torch.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
-    model, tokenizer, meta = load_model(
-        source, device, phase="eval", model_tag=model_tag, step=step
-    )
+    model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
     engine = Engine(model, tokenizer)
 
     # Get the tasks to evaluate on

@@ -43,9 +43,7 @@ def tokenizing_distributed_data_loader_with_state(
         parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
         resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
         resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
-        pq_idx = (
-            resume_pq_idx  # we kick off parquet files at the resume index (or by default just 0)
-        )
+        pq_idx = resume_pq_idx  # we kick off parquet files at the resume index (or by default just 0)
         while True:  # iterate infinitely (multi-epoch)
             while pq_idx < len(parquet_paths):  # iterate over all parquet files
                 filepath = parquet_paths[pq_idx]
@@ -54,18 +52,14 @@ def tokenizing_distributed_data_loader_with_state(
                 # I know this state resumption is a little bit tricky and a little bit hacky... sigh.
                 if resume_rg_idx is not None:
                     base_idx = resume_rg_idx // ddp_world_size  # in units of ddp_world_size
-                    base_idx += (
-                        1  # advance by 1 so that we definitely don't repeat data after resuming
-                    )
+                    base_idx += 1  # advance by 1 so that we definitely don't repeat data after resuming
                     rg_idx = base_idx * ddp_world_size + ddp_rank
                     resume_rg_idx = None  # set to None as we only want to do this a single time
                 else:
                     rg_idx = ddp_rank
                 while rg_idx < pf.num_row_groups:
                     rg = pf.read_row_group(rg_idx)
-                    batch = rg.column(
-                        "text"
-                    ).to_pylist()  # each batch is a parquet group, e.g. 1024 rows
+                    batch = rg.column("text").to_pylist()  # each batch is a parquet group, e.g. 1024 rows
                     # the tokenizer encode might want to go in even smaller batches, e.g. 128 rows
                     for i in range(0, len(batch), tokenizer_batch_size):
                         yield batch[i : i + tokenizer_batch_size], (pq_idx, rg_idx)
@@ -82,9 +76,7 @@ def tokenizing_distributed_data_loader_with_state(
         # Accumulate enough tokens for one iteration before yielding.
         while len(token_buffer) < needed_tokens:
             doc_batch, (pq_idx, rg_idx) = next(batches)
-            token_lists = tokenizer.encode(
-                doc_batch, prepend=bos_token, num_threads=tokenizer_threads
-            )
+            token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
             for tokens in token_lists:
                 token_buffer.extend(tokens)
             batch_index += 1
@@ -107,7 +99,5 @@ def tokenizing_distributed_data_loader_with_state(
 
 def tokenizing_distributed_data_loader(*args, **kwargs):
     # helper function that only emits the inputs/targets and not the state_dict
-    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state(
-        *args, **kwargs
-    ):
+    for inputs, targets, _ in tokenizing_distributed_data_loader_with_state(*args, **kwargs):
         yield inputs, targets

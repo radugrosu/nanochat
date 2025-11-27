@@ -1,27 +1,28 @@
 from contextlib import nullcontext
-from typing import Annotated, Literal
+from typing import Literal
 
 import torch
 import typer
-
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import autodetect_device_type, compute_init
 from nanochat.engine import Engine
+from scripts.common import opt
 
 
 def main(
-    source: Annotated[str, typer.Option(help="Source of the model: sft|mid|rl")] = "sft",
-    model_tag: Annotated[str | None, typer.Option(help="Model tag to load")] = None,
-    step: Annotated[int | None, typer.Option(help="Step to load")] = None,
-    prompt: Annotated[str, typer.Option(help="Prompt the model, get a single response back")] = "",
-    max_tokens: Annotated[int, typer.Option(help="Max. num. of tokens to generate")] = 256,
-    temperature: Annotated[float, typer.Option(help="Temperature for generation")] = 0.6,
-    top_k: Annotated[int, typer.Option(help="Top-k sampling parameter")] = 50,
-    device_type: Annotated[
-        Literal["cuda", "cpu", "mps", ""],
-        typer.Option(help="Device type for evaluation. (empty => autodetect)"),
-    ] = "",
-    dtype: Annotated[Literal["float32", "bfloat16"], typer.Option(help="Model dtype")] = "bfloat16",
+    # Model Loading
+    source: str = opt("sft", "Source of the model: sft|mid|rl"),
+    model_tag: str | None = opt(None, "Model tag to load"),
+    step: int | None = opt(None, "Step to load"),
+    # Runtime
+    device_type: Literal["cuda", "cpu", "mps", ""] = opt("", "Device type for evaluation. (empty => autodetect)"),
+    dtype: Literal["float32", "bfloat16"] = opt("bfloat16", "Model dtype"),
+    # Input
+    prompt: str = opt("", "Prompt the model, get a single response back"),
+    # Generation / Sampling
+    max_tokens: int = opt(256, "Max. num. of tokens to generate"),
+    temperature: float = opt(0.6, "Temperature for generation"),
+    top_k: int = opt(50, "Top-k sampling parameter"),
 ):
     """Chat with the model.
     Intended to be run single GPU only atm:
@@ -40,9 +41,7 @@ def main(
         if device_type == "cuda"
         else nullcontext()
     )
-    model, tokenizer, meta = load_model(
-        source, device, phase="eval", model_tag=model_tag, step=step
-    )
+    model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
 
     # Special tokens for the chat state machine
     bos = tokenizer.get_bos_token_id()
@@ -106,9 +105,7 @@ def main(
         response_tokens = []
         print("\nAssistant: ", end="", flush=True)
         with autocast_ctx:
-            for token_column, token_masks in engine.generate(
-                conversation_tokens, **generate_kwargs
-            ):
+            for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
                 token = token_column[0]  # pop the batch dimension (num_samples=1)
                 response_tokens.append(token)
                 token_text = tokenizer.decode([token])
@@ -123,3 +120,7 @@ def main(
         # In the prompt mode, we only want a single response and exit
         if prompt:
             break
+
+
+if __name__ == "__main__":
+    typer.run(main)

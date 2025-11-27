@@ -7,24 +7,21 @@ import random
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, AsyncGenerator, AsyncIterable, List, Literal, Optional
+from typing import AsyncGenerator, AsyncIterable, List, Literal, Optional
 
 import torch
 import typer
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from pydantic import BaseModel
-
 from nanochat.checkpoint_manager import load_model
-from nanochat.common import autodetect_device_type, compute_init
 from nanochat.engine import Engine
 from nanochat.tokenizer import RustBPETokenizer
+from pydantic import BaseModel
+from scripts.common import opt
 
 # Configure logging for conversation traffic
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
 
 # Abuse prevention limits
@@ -61,9 +58,7 @@ class WorkerPool:
                 num_gpus = 1  # e.g. cpu|mps
         self.num_gpus = num_gpus
         if self.num_gpus > 1:
-            assert self.device_type == "cuda", (
-                "Only CUDA supports multiple workers/GPUs. cpu|mps does not."
-            )
+            assert self.device_type == "cuda", "Only CUDA supports multiple workers/GPUs. cpu|mps does not."
         self.device_type: str = device_type
         self.workers: List[Worker] = []
         self.available_workers: asyncio.Queue = asyncio.Queue()
@@ -86,15 +81,9 @@ class WorkerPool:
                 device = torch.device(self.device_type)  # e.g. cpu|mps
                 print(f"Loading model on {self.device_type}...")
 
-            model, tokenizer, _ = load_model(
-                source, device, phase="eval", model_tag=model_tag, step=step
-            )
+            model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
             engine = Engine(model, tokenizer)
-            autocast_ctx = (
-                torch.autocast(device_type=self.device_type, dtype=ptdtype)
-                if self.device_type == "cuda"
-                else nullcontext()
-            )
+            autocast_ctx = torch.autocast(device_type=self.device_type, dtype=ptdtype) if self.device_type == "cuda" else nullcontext()
 
             worker = Worker(
                 gpu_id=gpu_id,
@@ -179,9 +168,7 @@ def validate_chat_request(request: ChatRequest):
     # Validate top_k
     if request.top_k is not None:
         if not (MIN_TOP_K <= request.top_k <= MAX_TOP_K):
-            raise HTTPException(
-                status_code=400, detail=f"top_k must be between {MIN_TOP_K} and {MAX_TOP_K}"
-            )
+            raise HTTPException(status_code=400, detail=f"top_k must be between {MIN_TOP_K} and {MAX_TOP_K}")
 
     # Validate max_tokens
     if request.max_tokens is not None:
@@ -241,34 +228,19 @@ async def generate_stream(
 
 
 def main(
-    num_gpus: Annotated[
-        int, typer.Option("-n", "--num-gpus", help="Number of GPUs to use (default: 1)")
-    ] = 1,
-    source: Annotated[
-        str, typer.Option("-i", "--source", help="Source of the model: sft|mid|rl")
-    ] = "sft",
-    temperature: Annotated[
-        float, typer.Option("-t", "--temperature", help="Default temperature for generation")
-    ] = 0.8,
-    top_k: Annotated[
-        int, typer.Option("-k", "--top-k", help="Default top-k sampling parameter")
-    ] = 50,
-    max_tokens: Annotated[
-        int, typer.Option("-m", "--max-tokens", help="Default max tokens for generation")
-    ] = 512,
-    model_tag: Annotated[
-        str | None, typer.Option("-g", "--model-tag", help="Model tag to load")
-    ] = None,
-    step: Annotated[int | None, typer.Option("-s", "--step", help="Step to load")] = None,
-    port: Annotated[int, typer.Option("-p", "--port", help="Port to run the server on")] = 8000,
-    dtype: Annotated[Literal["float32", "bfloat16"], typer.Option("-d", "--dtype")] = "bfloat16",
-    device_type: Annotated[
-        Literal["cuda", "cpu", "mps", ""],
-        typer.Option(
-            "--device-type", help="Device type for evaluation: cuda|cpu|mps. empty => autodetect"
-        ),
-    ] = "",
-    host: Annotated[str, typer.Option("--host", help="Host to bind the server to")] = "0.0.0.0",
+    # Server Configuration
+    host: str = opt("0.0.0.0", "Host to bind the server to"),
+    port: int = opt(8000, "Port to run the server on"),
+    num_gpus: int = opt(1, "Number of GPUs to use (default: 1)"),
+    # Model Loading
+    source: str = opt("sft", "Source of the model: sft|mid|rl"),
+    model_tag: str | None = opt(None, "Model tag to load"),
+    step: int | None = opt(None, "Step to load"),
+    dtype: Literal["float32", "bfloat16"] = opt("bfloat16", "Model dtype"),
+    # Generation Defaults
+    temperature: float = opt(0.8, "Default temperature for generation"),
+    top_k: int = opt(50, "Default top-k sampling parameter"),
+    max_tokens: int = opt(512, "Default max tokens for generation"),
 ):
     """Unified web chat server - serves both UI and API from a single FastAPI instance.
 
@@ -304,8 +276,6 @@ def main(
     print("Starting NanoChat Web Server")
     print(f"Temperature: {temperature}, Top-k: {top_k}, Max tokens: {max_tokens}")
 
-    device_type = autodetect_device_type() if device_type == "" else device_type
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
 
     @asynccontextmanager
@@ -313,9 +283,7 @@ def main(
         """Load models on all GPUs on startup."""
         print("Loading nanochat models across GPUs...")
         app.state.worker_pool = WorkerPool(num_gpus=num_gpus)
-        await app.state.worker_pool.initialize(
-            source, model_tag=model_tag, step=step, ptdtype=ptdtype
-        )
+        await app.state.worker_pool.initialize(source, model_tag=model_tag, step=step, ptdtype=ptdtype)
         print(f"Server ready at http://localhost:{port}")
         yield
 
@@ -336,9 +304,7 @@ def main(
         with open(ui_html_path, "r") as f:
             html_content = f.read()
         # Replace the API_URL to use the same origin
-        html_content = html_content.replace(
-            "const API_URL = `http://${window.location.hostname}:8000`;", "const API_URL = '';"
-        )
+        html_content = html_content.replace("const API_URL = `http://${window.location.hostname}:8000`;", "const API_URL = '';")
         return HTMLResponse(content=html_content)
 
     @app.get("/logo.svg")
@@ -356,7 +322,7 @@ def main(
 
         # Log incoming conversation to console
         logger.info("=" * 20)
-        for i, message in enumerate(request.messages):
+        for _, message in enumerate(request.messages):
             logger.info(f"[{message.role.upper()}]: {message.content}")
         logger.info("-" * 20)
 

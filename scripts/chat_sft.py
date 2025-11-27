@@ -1,7 +1,7 @@
 import os
-from typing import Annotated, Iterable, Literal
+from typing import Iterable, Literal
 
-from scripts.common import config_from_context
+from scripts.common import config_from_context, opt
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -11,7 +11,6 @@ import torch
 import torch.distributed as dist
 import typer
 import wandb
-
 from nanochat.checkpoint_manager import load_model, save_checkpoint
 from nanochat.common import (
     DummyWandb,
@@ -34,40 +33,30 @@ from tasks.spellingbee import SimpleSpelling, SpellingBee
 
 def main(
     ctx: typer.Context,
-    run: Annotated[
-        str,
-        typer.Option(help='wandb run name default ("dummy" is special - we won\'t log to wandb)'),
-    ] = "dummy",
-    source: Annotated[
-        Literal["base", "mid"],
-        typer.Option(help="Which checkpoint to load the model from (base model or midtrained model)"),
-    ] = "mid",
-    model_tag: Annotated[
-        str | None,
-        typer.Option(help="Model tag to load the model from (base model or midtrained model)"),
-    ] = None,
-    step: Annotated[
-        int | None,
-        typer.Option(help="Step to load the model from (base model or midtrained model)"),
-    ] = None,
-    device_type: Annotated[Literal["cuda", "cpu", "mps", ""], typer.Option(help="cuda|cpu|mps (empty => autodetect)")] = "",
-    dtype: Annotated[str, typer.Option(help="Data type for model weights")] = "bfloat16",
-    device_batch_size: Annotated[int, typer.Option(help="Max to avoid OOM")] = 4,
-    num_epochs: Annotated[int, typer.Option(help="Number of epochs to train")] = 1,
-    num_iterations: Annotated[
-        int,
-        typer.Option(help="Override number of iterations (-1 = disable, use num_epochs to derive it)"),
-    ] = -1,
-    target_examples_per_step: Annotated[int, typer.Option(help="Target number of examples per training step")] = 32,
-    unembedding_lr: Annotated[float, typer.Option(help="Learning rate for unembedding layer")] = 0.004,
-    embedding_lr: Annotated[float, typer.Option(help="Learning rate for embedding layer")] = 0.2,
-    matrix_lr: Annotated[float, typer.Option(help="Learning rate for matrix parameters")] = 0.02,
-    weight_decay: Annotated[float, typer.Option(help="Weight decay for optimizer")] = 0.0,
-    init_lr_frac: Annotated[float, typer.Option(help="Initial learning rate fraction")] = 0.02,
-    eval_every: Annotated[int, typer.Option(help="Evaluate model every N steps")] = 100,
-    eval_steps: Annotated[int, typer.Option(help="Number of evaluation steps")] = 100,
-    eval_metrics_every: Annotated[int, typer.Option(help="Evaluate metrics every N steps")] = 200,
-    eval_metrics_max_problems: Annotated[int, typer.Option(help="Maximum number of problems for metrics evaluation")] = 1024,
+    run: str = opt("dummy", 'wandb run name default ("dummy" is special - we won\'t log to wandb)'),
+    # Runtime
+    device_type: Literal["cuda", "cpu", "mps", ""] = opt("", "cuda|cpu|mps (empty => autodetect)"),
+    dtype: str = opt("bfloat16", "Data type for model weights"),
+    # Model Loading
+    source: Literal["base", "mid"] = opt("mid", "Which checkpoint to load the model from (base model or midtrained model)"),
+    model_tag: str | None = opt(None, "Model tag to load the model from (base model or midtrained model)"),
+    step: int | None = opt(None, "Step to load the model from (base model or midtrained model)"),
+    # Training Configuration
+    device_batch_size: int = opt(4, "Max to avoid OOM"),
+    num_epochs: int = opt(1, "Number of epochs to train"),
+    num_iterations: int = opt(-1, "Override number of iterations (-1 = disable, use num_epochs to derive it)"),
+    target_examples_per_step: int = opt(32, "Target number of examples per training step"),
+    # Optimization
+    unembedding_lr: float = opt(0.004, "Learning rate for unembedding layer"),
+    embedding_lr: float = opt(0.2, "Learning rate for embedding layer"),
+    matrix_lr: float = opt(0.02, "Learning rate for matrix parameters"),
+    weight_decay: float = opt(0.0, "Weight decay for optimizer"),
+    init_lr_frac: float = opt(0.02, "Initial learning rate fraction"),
+    # Evaluation
+    eval_every: int = opt(100, "Evaluate model every N steps"),
+    eval_steps: int = opt(100, "Number of evaluation steps"),
+    eval_metrics_every: int = opt(200, "Evaluate metrics every N steps"),
+    eval_metrics_max_problems: int = opt(1024, "Maximum number of problems for metrics evaluation"),
 ):
     """Finetune a base model to be a chat model.
 
@@ -179,8 +168,8 @@ def main(
         weight_decay=weight_decay,
     )
     # Set the initial learning rate as a fraction of the base learning rate
-    for opt in optimizers:
-        for group in opt.param_groups:
+    for optimizer in optimizers:
+        for group in optimizer.param_groups:
             group["lr"] = group["lr"] * init_lr_frac
             group["initial_lr"] = group["lr"]  # save the initial learning so we can decay easily later
 
@@ -271,13 +260,13 @@ def main(
 
         # learning rate scheduler
         lrm = get_lr_multiplier(step)
-        for opt in optimizers:
-            for group in opt.param_groups:
+        for optimizer in optimizers:
+            for group in optimizer.param_groups:
                 group["lr"] = group["initial_lr"] * lrm
 
         # step the optimizers
-        for opt in optimizers:
-            opt.step()
+        for optimizer in optimizers:
+            optimizer.step()
         model.zero_grad(set_to_none=True)
 
         # logging

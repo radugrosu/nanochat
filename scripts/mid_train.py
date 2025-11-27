@@ -1,13 +1,13 @@
 import os
 
-from scripts.common import config_from_context
+from scripts.common import config_from_context, opt
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import time
 from collections import deque
 from contextlib import nullcontext
-from typing import Annotated, Literal, cast
+from typing import Literal, cast
 
 import torch
 import torch.distributed as dist
@@ -36,46 +36,30 @@ from tasks.spellingbee import SimpleSpelling, SpellingBee
 
 def main(
     ctx: typer.Context,
-    run: Annotated[
-        str,
-        typer.Option(help='wandb run name default ("dummy" is special - we won\'t log to wandb)'),
-    ] = "dummy",
-    device_type: Annotated[str, typer.Option(help="cuda|cpu|mps (empty => autodetect)")] = "",
-    model_tag: Annotated[
-        str | None,
-        typer.Option(help="Model tag to load the model from (base model or midtrained model)"),
-    ] = None,
-    step: Annotated[
-        int | None,
-        typer.Option(help="Step to load the model from (base model or midtrained model)"),
-    ] = None,
-    num_iterations: Annotated[
-        int, typer.Option(help="Explicit number of steps of the optimization (-1 = disable)")
-    ] = -1,
-    max_seq_len: Annotated[int, typer.Option(help="Maximum sequence length")] = 2048,
-    device_batch_size: Annotated[int, typer.Option(help="Batch size per device")] = 32,
-    unembedding_lr: Annotated[
-        float, typer.Option(help="Learning rate for unembedding layer")
-    ] = 0.004,
-    embedding_lr: Annotated[float, typer.Option(help="Learning rate for embedding layer")] = 0.2,
-    matrix_lr: Annotated[float, typer.Option(help="Learning rate for matrix parameters")] = 0.02,
-    init_lr_frac: Annotated[
-        float, typer.Option(help="Initial learning rate is this fraction of the base learning rate")
-    ] = 1.0,
-    weight_decay: Annotated[float, typer.Option(help="Weight decay for optimizer")] = 0.0,
-    eval_every: Annotated[int, typer.Option(help="Evaluate every N steps (-1 = disable)")] = 150,
-    eval_tokens: Annotated[int, typer.Option(help="Number of tokens for evaluation")] = 20 * 524288,
-    total_batch_size: Annotated[
-        int, typer.Option(help="Total batch size across all devices")
-    ] = 524288,
-    dry_run: Annotated[
-        int,
-        typer.Option(
-            help="dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report"
-        ),
-    ] = 0,
-    ema_beta: Annotated[float, typer.Option(help="EMA decay factor")] = 0.9,
-    wandb_log_every: Annotated[int, typer.Option(help="Log to wandb every N steps")] = 10,
+    run: str = opt("dummy", 'wandb run name default ("dummy" is special - we won\'t log to wandb)'),
+    # Runtime
+    device_type: str = opt("", "cuda|cpu|mps (empty => autodetect)"),
+    # Model Loading
+    model_tag: str | None = opt(None, "Model tag to load the model from (base model or midtrained model)"),
+    step: int | None = opt(None, "Step to load the model from (base model or midtrained model)"),
+    # Training Configuration
+    num_iterations: int = opt(-1, "Explicit number of steps of the optimization (-1 = disable)"),
+    max_seq_len: int = opt(2048, "Maximum sequence length"),
+    device_batch_size: int = opt(32, "Batch size per device"),
+    total_batch_size: int = opt(524288, "Total batch size across all devices"),
+    # Optimization
+    unembedding_lr: float = opt(0.004, "Learning rate for unembedding layer"),
+    embedding_lr: float = opt(0.2, "Learning rate for embedding layer"),
+    matrix_lr: float = opt(0.02, "Learning rate for matrix parameters"),
+    init_lr_frac: float = opt(1.0, "Initial learning rate is this fraction of the base learning rate"),
+    weight_decay: float = opt(0.0, "Weight decay for optimizer"),
+    ema_beta: float = opt(0.9, "EMA decay factor"),
+    # Evaluation
+    eval_every: int = opt(150, "Evaluate every N steps (-1 = disable)"),
+    eval_tokens: int = opt(20 * 524288, "Number of tokens for evaluation"),
+    # Logging & Misc
+    dry_run: int = opt(0, "dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report"),
+    wandb_log_every: int = opt(10, "Log to wandb every N steps"),
 ):
     """Midtrain the model. Same as pretraining but simpler.
 
@@ -103,37 +87,23 @@ def main(
 
     # wandb logging init
     use_dummy_wandb = run == "dummy" or not master_process
-    wandb_run = (
-        DummyWandb()
-        if use_dummy_wandb
-        else wandb.init(project="nanochat-mid", name=run, config=user_config)
-    )
+    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-mid", name=run, config=user_config)
 
     # Load the model and tokenizer
-    model, tokenizer, meta = load_model(
-        "base", device, phase="train", model_tag=model_tag, step=step
-    )
+    model, tokenizer, meta = load_model("base", device, phase="train", model_tag=model_tag, step=step)
     pretrain_batch_size = meta.get("device_batch_size", None)
     if pretrain_batch_size is not None and device_batch_size > pretrain_batch_size:
-        print0(
-            f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device_batch_size to this script?"
-        )
+        print0(f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device_batch_size to this script?")
     depth = model.config.n_layer
     num_flops_per_token = model.estimate_flops()
     orig_model = model
     tokens_per_fwdbwd = device_batch_size * max_seq_len  # tokens per iteration for a single rank
-    world_tokens_per_fwdbwd = (
-        tokens_per_fwdbwd * ddp_world_size
-    )  # total tokens per iteration for all ranks
+    world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size  # total tokens per iteration for all ranks
     assert total_batch_size % world_tokens_per_fwdbwd == 0
     grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
-    print0(
-        f"Tokens / micro-batch / rank: {device_batch_size} x {max_seq_len} = {tokens_per_fwdbwd:,}"
-    )
+    print0(f"Tokens / micro-batch / rank: {device_batch_size} x {max_seq_len} = {tokens_per_fwdbwd:,}")
     print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
-    print0(
-        f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}"
-    )
+    print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
     token_bytes = get_token_bytes(device=device)
 
     # Initialize the Optimizer (Muon for Linear layers, AdamW for embedding and lm_head)
@@ -145,12 +115,10 @@ def main(
     )
     _, muon_optimizer = optimizers
     # Override the initial learning rate as a fraction of the base learning rate
-    for opt in optimizers:
-        for group in opt.param_groups:
+    for opti in optimizers:
+        for group in opti.param_groups:
             group["lr"] = group["lr"] * init_lr_frac
-            group["initial_lr"] = group[
-                "lr"
-            ]  # save the initial learning so we can decay easily later
+            group["initial_lr"] = group["lr"]  # save the initial learning so we can decay easily later
 
     # Midtraining data mixture and DataLoader
     base_dir = get_base_dir()
@@ -158,33 +126,19 @@ def main(
     train_dataset = TaskMixture(
         [
             SmolTalk(split="train"),  # 460K rows of general conversations
-            MMLU(
-                subset="auxiliary_train", split="train"
-            ),  # 100K rows of multiple choice problems drawn from ARC, MC_TEST, OBQA, RACE
-            GSM8K(
-                subset="main", split="train"
-            ),  # 8K rows teaching simple math and (calculator) tool use
-            CustomJSON(
-                filepath=identity_conversations_filepath
-            ),  # 1000 rows of synthetic identity conversations
+            MMLU(subset="auxiliary_train", split="train"),  # 100K rows of multiple choice problems drawn from ARC, MC_TEST, OBQA, RACE
+            GSM8K(subset="main", split="train"),  # 8K rows teaching simple math and (calculator) tool use
+            CustomJSON(filepath=identity_conversations_filepath),  # 1000 rows of synthetic identity conversations
             CustomJSON(filepath=identity_conversations_filepath),  # let's do 2 epochs of these
-            SimpleSpelling(
-                size=200000, split="train"
-            ),  # 200K rows of Simple Spelling (e.g. spell the word 'apple')
-            SpellingBee(
-                size=80000, split="train"
-            ),  # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
+            SimpleSpelling(size=200000, split="train"),  # 200K rows of Simple Spelling (e.g. spell the word 'apple')
+            SpellingBee(size=80000, split="train"),  # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
         ]
     )  # total: 460K + 100K + 8K + 200K + 80K = 848K rows
     val_dataset = TaskMixture(
         [
             SmolTalk(split="test"),  # 24K rows in test set
-            MMLU(
-                subset="all", split="test", stop=5200
-            ),  # 14K rows in test set, use only 5.2K to match the train ratios
-            GSM8K(
-                subset="main", split="test", stop=420
-            ),  # 1.32K rows in test set, use only 420 to match the train ratios
+            MMLU(subset="all", split="test", stop=5200),  # 14K rows in test set, use only 5.2K to match the train ratios
+            GSM8K(subset="main", split="test", stop=420),  # 1.32K rows in test set, use only 420 to match the train ratios
         ]
     )  # total: 24K + 14K + 1.32K ~= 39K rows
 
@@ -200,9 +154,7 @@ def main(
         dataset = train_dataset if split == "train" else val_dataset
         dataset_size = len(dataset)
         assert dataset_size > 0
-        needed_tokens = (
-            device_batch_size * max_seq_len + 1
-        )  # to form one training batch of inputs,targets
+        needed_tokens = device_batch_size * max_seq_len + 1  # to form one training batch of inputs,targets
         token_buffer = deque()
         # CUDA supports memory pinning for faster transfers between CPU and GPU:
         scratch = torch.empty(needed_tokens, dtype=torch.int64, pin_memory=(device_type == "cuda"))
@@ -218,9 +170,7 @@ def main(
                 if cursor >= dataset_size:
                     cursor -= dataset_size  # wrap around for another epoch
                     if split == "train":
-                        last_step = (
-                            True  # toggle last_step to True, which will terminate the training loop
-                        )
+                        last_step = True  # toggle last_step to True, which will terminate the training loop
             # Stopping condition to respect num_iterations, if given
             it += 1
             if num_iterations > 0 and it >= num_iterations:
@@ -230,21 +180,13 @@ def main(
                 scratch[i] = token_buffer.popleft()
             inputs_cpu = scratch[:-1].to(dtype=torch.int32)
             targets_cpu = scratch[1:]
-            inputs = inputs_cpu.view(device_batch_size, max_seq_len).to(
-                device=device, dtype=torch.int32, non_blocking=True
-            )
-            targets = targets_cpu.view(device_batch_size, max_seq_len).to(
-                device=device, dtype=torch.int64, non_blocking=True
-            )
+            inputs = inputs_cpu.view(device_batch_size, max_seq_len).to(device=device, dtype=torch.int32, non_blocking=True)
+            targets = targets_cpu.view(device_batch_size, max_seq_len).to(device=device, dtype=torch.int64, non_blocking=True)
             if split == "train":
                 if num_iterations > 0:
-                    approx_progress = (
-                        it / num_iterations
-                    )  # calculate progress from the max number of iterations
+                    approx_progress = it / num_iterations  # calculate progress from the max number of iterations
                 else:
-                    approx_progress = (
-                        cursor / dataset_size
-                    )  # approximate progress as a fraction of the dataset
+                    approx_progress = cursor / dataset_size  # approximate progress as a fraction of the dataset
             yield inputs, targets
 
     model = torch.compile(model, dynamic=False)
@@ -311,9 +253,7 @@ def main(
                 checkpoint_dir,
                 step,
                 orig_model.state_dict(),
-                [
-                    opt.state_dict() for opt in optimizers
-                ],  # TODO: make sure saving across ranks is done correctly
+                [opt.state_dict() for opt in optimizers],  # TODO: make sure saving across ranks is done correctly
                 {
                     "step": step,
                     "val_bpb": val_bpb,  # type: ignore
@@ -343,20 +283,18 @@ def main(
             train_loss = loss.detach()  # for logging
             loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
             loss.backward()
-            x, y = next(
-                train_loader
-            )  # prefetch the next batch while the GPU is busy with forward/backward
+            x, y = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
             progress = max(progress, approx_progress)  # only increase progress monotonically
         # step the optimizers
         lrm = get_lr_multiplier(progress)
-        for opt in optimizers:
-            for group in opt.param_groups:
+        for opti in optimizers:
+            for group in opti.param_groups:
                 group["lr"] = group["initial_lr"] * lrm
         muon_momentum = get_muon_momentum(step)
         for group in muon_optimizer.param_groups:
             group["momentum"] = muon_momentum
-        for opt in optimizers:
-            opt.step()
+        for opti in optimizers:
+            opti.step()
         model.zero_grad(set_to_none=True)
         synchronize()
         t1 = time.time()
@@ -374,9 +312,7 @@ def main(
         pct_done = 100 * progress
         tok_per_sec = int(total_batch_size / dt)
         flops_per_sec = num_flops_per_token * total_batch_size / dt
-        promised_flops_per_sec_h100 = (
-            989e12 * ddp_world_size
-        )  # bfloat16 H100 SXM and without 2:4 sparsity
+        promised_flops_per_sec_h100 = 989e12 * ddp_world_size  # bfloat16 H100 SXM and without 2:4 sparsity
         mfu = 100 * flops_per_sec / promised_flops_per_sec_h100  # in %
         if step > 10:
             total_training_time += dt  # only count the time after the first 10 steps

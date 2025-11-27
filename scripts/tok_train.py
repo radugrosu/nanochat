@@ -1,27 +1,20 @@
 import time
-from typing import Annotated, Iterable
+from typing import Iterable
 
 import torch
 import typer
-
 from nanochat.common import get_base_dir
 from nanochat.dataset import parquets_iter_batched
 from nanochat.report import get_report
 from nanochat.tokenizer import RustBPETokenizer
-from scripts.common import config_from_context
+from scripts.common import config_from_context, opt
 
 
 def main(
     ctx: typer.Context,
-    max_chars: Annotated[
-        int, typer.Option(help="Maximum characters to train on (default: 10B)")
-    ] = 10_000_000_000,
-    doc_cap: Annotated[
-        int, typer.Option(help="Maximum characters per document (default: 10,000)")
-    ] = 10_000,
-    vocab_size: Annotated[
-        int, typer.Option(help="Vocabulary size (default: 65536 = 2^16)")
-    ] = 65536,
+    max_chars: int = opt(10_000_000_000, "Maximum characters to train on (default: 10B)"),
+    doc_cap: int = opt(10_000, "Maximum characters per document (default: 10,000)"),
+    vocab_size: int = opt(66536, "Vocabulary size (default: 65536 = 2^16)"),
 ):
     """Train a GPT-4-type BPE tokenizer using the HuggingFace Tokenizers library."""
 
