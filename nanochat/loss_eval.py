@@ -1,6 +1,4 @@
-"""
-A number of functions that help with evaluating a base model.
-"""
+"""Functions for evaluating a base model."""
 
 from __future__ import annotations
 
@@ -53,16 +51,12 @@ def evaluate_bpb(
             valid = y >= 0
             y_safe = torch.where(valid, y, torch.zeros_like(y))
             # map valid targets to their byte length; ignored targets contribute 0 bytes
-            num_bytes2d = torch.where(
-                valid, token_bytes[y_safe], torch.zeros_like(y, dtype=token_bytes.dtype)
-            )
-            total_nats += (loss2d * (num_bytes2d > 0)).sum()
-            total_bytes += num_bytes2d.sum()
+            num_bytes2d = torch.where(valid, token_bytes[y_safe], torch.zeros_like(y, dtype=token_bytes.dtype))
         else:
             # fast path: no ignored targets, safe to index directly
             num_bytes2d = token_bytes[y]
-            total_nats += (loss2d * (num_bytes2d > 0)).sum()
-            total_bytes += num_bytes2d.sum()
+        total_nats += (loss2d * (num_bytes2d > 0)).sum()
+        total_bytes += num_bytes2d.sum()
     # sum reduce across all ranks
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     if world_size > 1:

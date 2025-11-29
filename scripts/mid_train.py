@@ -13,7 +13,6 @@ import torch
 import torch.distributed as dist
 import typer
 import wandb
-
 from nanochat.checkpoint_manager import load_model, save_checkpoint
 from nanochat.common import (
     DummyWandb,

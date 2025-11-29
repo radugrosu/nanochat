@@ -44,7 +44,31 @@ def norm(x: torch.Tensor) -> torch.Tensor:
     return F.rms_norm(x, (x.size(-1),))
 
 
-def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+def precompute_rope(
+    seq_len: int,
+    head_dim: int,
+    device: str | torch.device,
+    base: int = 10000,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # autodetect the device from model embeddings
+    # stride the channels
+    channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
+    # base angle
+    inv_freq = 1.0 / (base ** (channel_range / head_dim))
+    # stride the time steps
+    t = torch.arange(seq_len, dtype=torch.float32, device=device)
+    # calculate the rotation frequencies at each (time, channel) pair
+    freqs = torch.outer(t, inv_freq)
+    cos, sin = freqs.cos(), freqs.sin()
+    cos, sin = cos.bfloat16(), sin.bfloat16()  # keep them in bfloat16
+    cos, sin = (
+        cos[None, :, None, :],
+        sin[None, :, None, :],
+    )  # add batch and head dims for later broadcasting
+    return cos, sin
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     assert x.ndim == 4  # multihead attention
     d = x.shape[3] // 2
     x1, x2 = x[..., :d], x[..., d:]  # split up last time into two halves
@@ -82,9 +106,7 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
-    def forward(
-        self, x: torch.Tensor, cos_sin: torch.Tensor, kv_cache: KVCache | None
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cos_sin: torch.Tensor, kv_cache: KVCache | None) -> torch.Tensor:
         B, T, _ = x.size()
 
         # Project the input to get queries, keys, and values
@@ -94,7 +116,7 @@ class CausalSelfAttention(nn.Module):
 
         # Apply Rotary Embeddings to queries and keys to get relative positional encoding
         cos, sin = cos_sin
-        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)  # QK rotary embedding
+        q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)  # QK rotary embedding
         q, k = norm(q), norm(k)  # QK norm
         q, k, v = (
             q.transpose(1, 2),
@@ -123,16 +145,12 @@ class CausalSelfAttention(nn.Module):
         else:
             # During inference AND we have a chunk of queries in this forward pass:
             # First, each query attends to all the cached keys/values (i.e. full prefix)
-            attn_mask = torch.zeros(
-                (Tq, Tk), dtype=torch.bool, device=q.device
-            )  # True = keep, False = mask
+            attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device)  # True = keep, False = mask
             prefix_len = Tk - Tq
             if prefix_len > 0:  # can't be negative but could be zero
                 attn_mask[:, :prefix_len] = True
             # Then, causal attention within this chunk
-            attn_mask[:, prefix_len:] = torch.tril(
-                torch.ones((Tq, Tq), dtype=torch.bool, device=q.device)
-            )
+            attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
 
         # Re-assemble the heads side by side and project back to residual stream
@@ -179,9 +197,7 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(
             {
                 "wte": nn.Embedding(config.vocab_size, config.n_embd),
-                "h": nn.ModuleList(
-                    [Block(config, layer_idx) for layer_idx in range(config.n_layer)]
-                ),
+                "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
             }
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -189,13 +205,15 @@ class GPT(nn.Module):
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
         # so let's just over-compute them, but assert fail if we ever reach that amount.
         # In the future we can dynamically grow the cache, for now it's fine.
-        self.rotary_seq_len = (
-            config.sequence_len * 10
-        )  # 10X over-compute should be enough, TODO make nicer?
+        self.rotary_seq_len = config.sequence_len * 10  # 10X over-compute should be enough, TODO make nicer?
         head_dim = config.n_embd // config.n_head
-        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        cos, sin = precompute_rope(self.rotary_seq_len, head_dim, self.device)
         self.cos = nn.Buffer(cos, persistent=False)  # not saved to the checkpoint
         self.sin = nn.Buffer(sin, persistent=False)
+
+    @property
+    def device(self) -> torch.device:
+        return self.wte.weight.device
 
     @property
     def h(self) -> ModuleSequence:
@@ -207,7 +225,7 @@ class GPT(nn.Module):
 
     def init_buffers(self):
         head_dim = self.config.n_embd // self.config.n_head
-        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        cos, sin = precompute_rope(self.rotary_seq_len, head_dim, self.device)
         self.cos, self.sin = cos, sin
 
     def init_weights(self):
@@ -234,31 +252,6 @@ class GPT(nn.Module):
                 torch.nn.init.zeros_(bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=1.0)
-
-    def _precompute_rotary_embeddings(
-        self,
-        seq_len: int,
-        head_dim: int,
-        base: int = 10000,
-        device: str | torch.device | None = None,
-    ):
-        # autodetect the device from model embeddings
-        if device is None:
-            device = self.wte.weight.device
-        # stride the channels
-        channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
-        inv_freq = 1.0 / (base ** (channel_range / head_dim))
-        # stride the time steps
-        t = torch.arange(seq_len, dtype=torch.float32, device=device)
-        # calculate the rotation frequencies at each (time, channel) pair
-        freqs = torch.outer(t, inv_freq)
-        cos, sin = freqs.cos(), freqs.sin()
-        cos, sin = cos.bfloat16(), sin.bfloat16()  # keep them in bfloat16
-        cos, sin = (
-            cos[None, :, None, :],
-            sin[None, :, None, :],
-        )  # add batch and head dims for later broadcasting
-        return cos, sin
 
     def get_device(self) -> torch.device:
         return self.wte.weight.device
@@ -289,16 +282,12 @@ class GPT(nn.Module):
         matrix_params = list(self.h.parameters())
         embedding_params = list(self.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(
-            lm_head_params
-        )
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
         # Create the AdamW optimizer for the embedding and lm_head
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         if rank == 0:
-            print(
-                f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}"
-            )
+            print(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
         adam_groups = [
             dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),

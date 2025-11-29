@@ -70,7 +70,7 @@ def main(
     ema_beta: float = opt(0.9, "EMA decay factor"),
     wandb_log_every: int = opt(100, "Log to wandb every N steps"),
 ):
-    """Train model. 
+    """Train model.
 
     Run on a single node: python -m scripts/base_train.py
 
@@ -88,7 +88,7 @@ def main(
     # Compute init
     device_type = autodetect_device_type()
     print0(f"Device type: {device_type}")
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    ddp, ddp_rank, _, ddp_world_size, device = compute_init(device_type)
     print0(f"Starting with: {ddp=}, {ddp_world_size=}")
     master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
     autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()

@@ -78,10 +78,26 @@ wait $DATASET_DOWNLOAD_PID
 
 NPN=1
 DEPTH=1
-BSZ=2
+BSZ=1
+TOTAL_BSZ=128
+MAXLEN=128
+EVAL_TOKENS=512
+NITER=2
 
 # pretrain the d2 model
-torchrun --standalone --nproc-per-node=$NPN -m scripts.base_train -- --depth=$DEPTH --run="$WANDB_RUN" --device-batch-size=$BSZ
+torchrun --standalone --nproc-per-node=$NPN -m scripts.base_train -- \
+  --depth=$DEPTH \
+  --run="$WANDB_RUN" \
+  --device-batch-size=$BSZ \
+  --total-batch-size=$TOTAL_BSZ \
+  --max-seq-len=$MAXLEN \
+  --eval-tokens=$EVAL_TOKENS \
+  --eval-every=1 \
+  --core-metric-every=1 \
+  --core-metric-max-per-task=2 \
+  --sample-every=1 \
+  --num-iterations=$NITER
+
 # evaluate the model on a larger chunk of train/val data and draw some samples
 torchrun --standalone --nproc-per-node=$NPN -m scripts.base_loss -- --device-batch-size=$BSZ
 # evaluate the model on CORE tasks
@@ -91,15 +107,29 @@ torchrun --standalone --nproc-per-node=$NPN -m scripts.base_eval
 # Midtraining (teach the model conversation special tokens, tool use, multiple choice)
 
 # run midtraining and eval the model
-torchrun --standalone --nproc-per-node=$NPN -m scripts.mid_train -- --run="$WANDB_RUN" --device-batch-size=$BSZ
-torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- -i mid
+torchrun --standalone --nproc-per-node=$NPN -m scripts.mid_train -- \
+  --run="$WANDB_RUN" \
+  --device-batch-size=$BSZ \
+  --total-batch-size=$TOTAL_BSZ \
+  --max-seq-len=$MAXLEN \
+  --num-iterations=$NITER \
+  --eval-tokens=$EVAL_TOKENS
+
+torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- \
+  --source mid \
+  --max-problems=2 \
+  --max-new-tokens=32
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
 # train sft and re-eval right away (should see a small bump)
-torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_sft -- --run="$WANDB_RUN" --device-batch-size=$BSZ
-torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- -i sft --batch-size=2
+torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_sft -- \
+  --run="$WANDB_RUN" \
+  --device-batch-size=$BSZ
+torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- \
+  --source sft \
+  --batch-size=$BSZ
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"
@@ -114,7 +144,7 @@ torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- -i sft --bat
 # run reinforcement learning
 torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_rl -- --run="$WANDB_RUN" --device-batch-size=$BSZ
 # eval the RL model only on GSM8K
-torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- -i rl -a GSM8K --batch-size=2
+torchrun --standalone --nproc-per-node=$NPN -m scripts.chat_eval -- --source rl -a GSM8K --batch-size=$BSZ
 
 # -----------------------------------------------------------------------------
 # Generate the full report by putting together all the sections

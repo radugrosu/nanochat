@@ -7,6 +7,7 @@ from typing import Iterable
 
 import torch
 import torch.distributed as dist
+from torch.futures import Future
 
 
 @torch.compile
@@ -134,9 +135,7 @@ class DistMuon(torch.optim.Optimizer):
         assert all(p.ndim == 2 for p in params), "Muon expects 2D parameters only"
         rank = dist.get_rank()
         # Group all parameters by their shape
-        shapes = sorted(
-            {p.shape for p in params}
-        )  # sort to ensure consistent / deterministic ordering
+        shapes = sorted({p.shape for p in params})  # sort to ensure consistent / deterministic ordering
         param_groups: list[dict[str, list[torch.Tensor] | torch.Tensor]] = []
         for shape in shapes:
             group_params: list[torch.Tensor] = [p for p in params if p.shape == shape]
@@ -144,12 +143,8 @@ class DistMuon(torch.optim.Optimizer):
             assert all(p.device == device for p in group_params)
             assert all(p.dtype == dtype for p in group_params)
             if rank == 0:
-                print(
-                    f"Muon: Grouping {len(group_params)} params of shape {shape}, device {device}, dtype {dtype}"
-                )
-            param_groups.append(
-                dict(params=group_params, zero_buffer=torch.zeros_like(group_params[0]))
-            )
+                print(f"Muon: Grouping {len(group_params)} params of shape {shape}, device {device}, dtype {dtype}")
+            param_groups.append(dict(params=group_params, zero_buffer=torch.zeros_like(group_params[0])))
         super().__init__(param_groups, defaults)
 
     @torch.no_grad()
@@ -172,19 +167,13 @@ class DistMuon(torch.optim.Optimizer):
                 # pad rs_input with the zero buffer to complete the group
                 rs_input.extend([zero_buffer] * (world_size - len(rs_input)))
                 # the output buffer gets strided across the group based on the rank
-                rs_output = (
-                    params[owner_idx].grad
-                    if owner_idx < len(params)
-                    else torch.empty_like(zero_buffer)
-                )
+                rs_output = params[owner_idx].grad if owner_idx < len(params) else torch.empty_like(zero_buffer)
                 # reduce scatter the gradients within this group of world_size params
-                work = dist.reduce_scatter(
-                    rs_output, rs_input, op=dist.ReduceOp.AVG, async_op=True
-                ).get_future()  # type: ignore
+                work = dist.reduce_scatter(rs_output, rs_input, op=dist.ReduceOp.AVG, async_op=True).get_future()  # type: ignore
                 reduce_scatter_futures.append(work)
 
         future_idx = 0
-        all_gather_futures: list[torch.Future[torch.Tensor]] = []
+        all_gather_futures: list[Future[torch.Tensor]] = []
         for group in self.param_groups:
             params = group["params"]
             zero_buffer = group["zero_buffer"]
@@ -209,12 +198,10 @@ class DistMuon(torch.optim.Optimizer):
                 # Replicate updated parameters to all ranks
                 ag_input = params[owner_idx] if owner_idx < len(params) else zero_buffer
                 ag_output = params[i : i + world_size]
-                ag_output.extend(
-                    [torch.empty_like(zero_buffer) for _ in range(world_size - len(ag_output))]
-                )  # pad
+                ag_output.extend([torch.empty_like(zero_buffer) for _ in range(world_size - len(ag_output))])  # pad
                 work = dist.all_gather(ag_output, ag_input, async_op=True).get_future()  # type: ignore
                 all_gather_futures.append(work)
 
         torch.futures.collect_all(
-            all_gather_futures, # type: ignore
+            all_gather_futures,  # type: ignore
         ).wait()

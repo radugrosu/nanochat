@@ -7,6 +7,7 @@ from typing import cast
 
 import torch
 import torch.distributed as dist
+from torch.futures import Future
 from torch.optim.optimizer import ParamsT
 
 
@@ -36,7 +37,7 @@ class DistAdamW(torch.optim.Optimizer):
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-        reduce_scatter_futures: list[torch.Future[torch.Tensor]] = []
+        reduce_scatter_futures: list[Future[torch.Tensor]] = []
         grad_slices: list[torch.Tensor] = []
         for group in self.param_groups:
             params: list[torch.Tensor] = group["params"]
@@ -45,15 +46,13 @@ class DistAdamW(torch.optim.Optimizer):
                 grad = cast(torch.Tensor, grad)
                 rank_size = grad.shape[0] // world_size
                 grad_slice = torch.empty_like(grad[:rank_size])
-                future = dist.reduce_scatter_tensor(
-                    grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True
-                ).get_future()  # type: ignore
-                future = cast(torch.Future[torch.Tensor], future)
+                future = dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future()  # type: ignore
+                future = cast(Future[torch.Tensor], future)
                 reduce_scatter_futures.append(future)
                 grad_slices.append(grad_slice)
 
         future_idx = 0
-        all_gather_futures: list[torch.Future[torch.Tensor]] = []
+        all_gather_futures: list[Future[torch.Tensor]] = []
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
             eps = group["eps"]
@@ -93,7 +92,7 @@ class DistAdamW(torch.optim.Optimizer):
                 update = exp_avg.div(denom).mul_(step_size)
                 p_slice.add_(other=update, alpha=-1.0)
                 future = dist.all_gather_into_tensor(p, p_slice, async_op=True).get_future()  # type: ignore
-                future = cast(torch.Future[torch.Tensor], future)
+                future = cast(Future[torch.Tensor], future)
                 all_gather_futures.append(future)
 
         torch.futures.collect_all(
