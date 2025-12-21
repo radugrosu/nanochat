@@ -1,5 +1,5 @@
 import os
-from typing import Iterable, Literal
+from typing import Iterator, Literal
 
 from scripts.common import config_from_context, opt
 
@@ -103,7 +103,7 @@ def main(
     # -----------------------------------------------------------------------------
     # DataLoader
 
-    def sft_data_generator(dataset: TaskMixture | Task, batch_size: int) -> Iterable[tuple[torch.Tensor, torch.Tensor]]:
+    def sft_data_generator(dataset: TaskMixture | Task, batch_size: int) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         pad_token_id = tokenizer.encode_special("<|assistant_end|>")  # use <|assistant_end|> as the pad token is ok, these positions are masked in the loss
 
         # prepares a list of tokenized conversations into a batch and yields
@@ -183,17 +183,16 @@ def main(
 
     # Go!
     step = 0
-    train_iter = iter(train_loader)
     for step in range(num_iterations):
         last_step = step == num_iterations - 1
 
         # evaluate the validation loss
         if last_step or step % eval_every == 0:
             model.eval()
-            val_iter = iter(build_val_loader())
+            val_loader = build_val_loader()
             losses = []
             for _ in range(eval_steps):
-                val_inputs, val_targets = next(val_iter)
+                val_inputs, val_targets = next(val_loader)
                 with torch.no_grad(), autocast_ctx:
                     loss = model(val_inputs, val_targets)
                 losses.append(loss)
@@ -248,7 +247,7 @@ def main(
         # evaluate the gradient
         num_tokens = torch.tensor(0, device=device)  # the number of "active" tokens of supervision seen
         for _ in range(grad_accum_steps):
-            train_inputs, train_targets = next(train_iter)
+            train_inputs, train_targets = next(train_loader)
             with autocast_ctx:
                 loss = model(train_inputs, train_targets)
             train_loss = loss.detach()  # for logging

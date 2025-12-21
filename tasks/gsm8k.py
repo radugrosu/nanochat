@@ -40,9 +40,7 @@ def extract_answer(completion: str) -> str | None:
 
 
 class GSM8K(Task):
-    def __init__(
-        self, subset: Literal["main", "socratic"], split: Literal["train", "test"], **kwargs
-    ):
+    def __init__(self, subset: Literal["main", "socratic"], split: Literal["train", "test"], **kwargs):
         super().__init__(**kwargs)
         assert subset in ["main", "socratic"], "GSM8K subset must be main|socratic"
         assert split in ["train", "test"], "GSM8K split must be train|test"
@@ -82,7 +80,7 @@ class GSM8K(Task):
             else:
                 # Regular text in between tool calls
                 assistant_message_parts.append({"type": "text", "text": part})
-        # No put it all together
+        # Now put it all together
         messages: list[Message] = [
             {"role": "user", "content": question},  # note: simple string
             {
@@ -109,12 +107,8 @@ class GSM8K(Task):
         # First extract the ground truth answer
         assistant_message = conversation["messages"][-1]
         assert assistant_message["role"] == "assistant", "Last message must be from the Assistant"
-        assert isinstance(assistant_message["content"], list), (
-            "This is expected to be a list of parts"
-        )
-        last_text_part = assistant_message["content"][-1][
-            "text"
-        ]  # this contains the final answer in GSM8K
+        assert isinstance(assistant_message["content"], list), "This is expected to be a list of parts"
+        last_text_part = assistant_message["content"][-1]["text"]  # this contains the final answer in GSM8K
         # Extract both the ground truth answer and the predicted answer
         ref_num = extract_answer(last_text_part)
         pred_num = extract_answer(response)

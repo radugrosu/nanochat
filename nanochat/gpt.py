@@ -147,8 +147,7 @@ class CausalSelfAttention(nn.Module):
             # First, each query attends to all the cached keys/values (i.e. full prefix)
             attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device)  # True = keep, False = mask
             prefix_len = Tk - Tq
-            if prefix_len > 0:  # can't be negative but could be zero
-                attn_mask[:, :prefix_len] = True
+            attn_mask[:, :prefix_len] = True
             # Then, causal attention within this chunk
             attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
@@ -340,11 +339,10 @@ class GPT(nn.Module):
         # Forward the lm_head (compute logits)
         softcap = 15
         logits = self.lm_head(x)
+        logits = logits.float()  # use tf32/fp32 for logits
         logits = softcap * torch.tanh(logits / softcap)  # logits softcap
         if targets is not None:
             # training mode: compute and return the loss
-            # TODO: experiment with Liger Kernels / chunked cross-entropy etc.
-            logits = logits.float()  # use tf32/fp32 for logits
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),

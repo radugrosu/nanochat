@@ -47,6 +47,7 @@ def save_checkpoint(
         log0(f"Saved metadata file to: {meta_path}")
     # Note that optimizer state is sharded across ranks, so each rank must save its own.
     if optimizer_data is not None:
+        checkpoint_dir.mkdir(exist_ok=True, parents=True)
         optimizer_path = checkpoint_dir / f"optim_{step:06d}_rank{rank:d}.pt"
         torch.save(optimizer_data, optimizer_path)
         log0(f"Saved optimizer file to: {optimizer_path}")
@@ -118,11 +119,11 @@ def build_model(
     return model, tokenizer, meta_data
 
 
-def find_largest_model(checkpoint_dir: FilePath) -> str:
+def find_largest_model(checkpoints_dir: FilePath) -> str:
     # attempt to guess the model tag: take the biggest model available
-    model_tags = [f for f in Path(checkpoint_dir).iterdir() if f.is_dir()]
+    model_tags = [f for f in Path(checkpoints_dir).iterdir() if f.is_dir()]
     if not model_tags:
-        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
+        raise FileNotFoundError(f"No checkpoints found in {checkpoints_dir}")
     # 1) normally all model tags are of the form d<number>, try that first:
     candidates: list[tuple[int, Path]] = []
     for model_tag in model_tags:

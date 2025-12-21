@@ -17,9 +17,7 @@ class Task[T]:
     def __init__(self, start: int = 0, stop: int | None = None, step: int = 1):
         # allows a lightweight logical view over a dataset
         assert start >= 0, f"Start must be non-negative, got {start}"
-        assert stop is None or stop >= start, (
-            f"Stop should be greater than or equal to start, got {stop} and {start}"
-        )
+        assert stop is None or stop >= start, f"Stop should be greater than or equal to start, got {stop} and {start}"
         assert step >= 1, f"Step must be strictly positive, got {step}"
         self.start = start
         self.stop = stop  # could be None here
@@ -56,8 +54,7 @@ class Task[T]:
 
 
 class TaskMixture(Task):
-    """
-    For SFT Training it becomes useful to train on a tax mixture of datasets.
+    """For SFT Training it becomes useful to train on a task mixture of datasets.
     Fun trick: if you wish to oversample any task, just pass it in multiple times in the list.
     """
 

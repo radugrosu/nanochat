@@ -32,10 +32,8 @@ from tasks.common import Task
 # Letters of the alphabet
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
 # A list of 370K English words of large variety
-WORD_LIST_URL = (
-    "https://raw.githubusercontent.com/dwyl/english-words/refs/heads/master/words_alpha.txt"
-)
-
+WORD_LIST_URL = "https://raw.githubusercontent.com/dwyl/english-words/refs/heads/master/words_alpha.txt"
+TEST_RANDOM_SEED_OFFSET = 10_000_000
 # Identical to gsm8k's answer extraction
 ANSWER_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
 
@@ -134,7 +132,7 @@ class SpellingBee(Task):
         return self.size
 
     def get_example(self, index: int) -> Conversation:
-        seed = index if self.split == "train" else -(index + 1)  # avoid collision at 0
+        seed = index if self.split == "train" else TEST_RANDOM_SEED_OFFSET + index
         rng = random.Random(seed)
 
         # pick a random word
@@ -184,9 +182,7 @@ Then count the occurrences of '{letter}':
         manual_text += f"\nThis gives us {running_count}."
         assistant_parts.append({"type": "text", "text": manual_text})
         # Part 2: Python verification
-        assistant_parts.append(
-            {"type": "text", "text": "\n\nLet me double check this using Python:\n\n"}
-        )
+        assistant_parts.append({"type": "text", "text": "\n\nLet me double check this using Python:\n\n"})
         # Part 3: Python tool call
         python_expr = f"'{word}'.count('{letter}')"
         assistant_parts.append({"type": "python", "text": python_expr})
@@ -219,9 +215,7 @@ Then count the occurrences of '{letter}':
         # First extract the ground truth answer from the conversation
         assistant_message = conversation["messages"][-1]
         assert assistant_message["role"] == "assistant", "Last message must be from the Assistant"
-        assert isinstance(assistant_message["content"], list), (
-            "This is expected to be a list of parts"
-        )
+        assert isinstance(assistant_message["content"], list), "This is expected to be a list of parts"
         # The last text part contains the final answer with ####
         last_text_part = assistant_message["content"][-1]["text"]
         # Extract both the ground truth answer and the predicted answer
