@@ -24,26 +24,29 @@ prompt:
    manually generate any kind of entropy you can think of and include it in your prompts
    to maintain healthy and good diversity in the data.
 
-NOTE: You need OpenRouter API key in a file called "openroutertoken.txt" in the root directory of the repo.
-      (obviously you can tune this arbitrarily to your liking)
+NOTE: You need OPENROUTER_API_KEY set in .env or as an environment variable.
 NOTE: For more details see this discussion: https://github.com/karpathy/nanochat/discussions/139
 """
 
 import copy
 import json
+import os
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
+from dotenv import load_dotenv
 
 from nanochat.common import get_base_dir
 
-api_key = open("openroutertoken.txt", encoding='utf-8').read().strip()
+load_dotenv()
+
+api_key = os.environ["OPENROUTER_API_KEY"]
 
 url = "https://openrouter.ai/api/v1/chat/completions"
 headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-readme = open("README.md", encoding='utf-8').read().strip()
+readme = open("README.md", encoding="utf-8").read().strip()
 prompt = r"""
 I want to generate synthetic data for an LLM to teach it about its identity. Here is the identity I want:
 

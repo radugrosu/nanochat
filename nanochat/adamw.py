@@ -12,8 +12,7 @@ from torch.optim.optimizer import ParamsT
 
 
 class DistAdamW(torch.optim.Optimizer):
-    """
-    Distributed AdamW optimizer.
+    """Distributed AdamW optimizer.
     In the style of ZeRO-2, i.e. sharded optimizer states and gradient reduction
     """
 
@@ -90,8 +89,8 @@ class DistAdamW(torch.optim.Optimizer):
                 bias1 = 1 - beta1**t
                 bias2 = 1 - beta2**t
                 # compute step
-                denom = exp_avg_sq.sqrt().add_(eps)
-                step_size = lr * (torch.sqrt(bias2) / bias1)
+                denom = (exp_avg_sq / bias2).sqrt().add_(eps)
+                step_size = lr / bias1
                 update = exp_avg.div(denom).mul_(step_size)
                 p_slice.add_(other=update, alpha=-1.0)
                 future = dist.all_gather_into_tensor(p, p_slice, async_op=True).get_future()  # type: ignore

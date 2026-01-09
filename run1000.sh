@@ -22,7 +22,7 @@ python -m nanochat.dataset -n 16
 # start downloading the rest of the shards for a total of 800 (see below why 800)
 python -m nanochat.dataset -n 800 &
 # todo: download the rest of it
-python -m scripts.tok_train --max-chars=4000000000
+python -m scripts.tok_train --max-chars=4000000000 --vocab_size=65536
 python -m scripts.tok_eval
 
 # Documenting my process for determining the hyperparameters for this run1000.sh script:
@@ -67,7 +67,7 @@ python -m scripts.tok_eval
 # start to overfit hard.
 # 5) That's it, everything else (e.g. the learning rates) is adjusted automatically by the training script.
 NPN=8
-torchrun --standalone --nproc_per_node=$NPN -m scripts.base_train -- --depth=32 --device-batch-size=8 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPN -m scripts.base_train -- --depth=32 --target_param_data_ratio=20 --device-batch-size=8 --run=$WANDB_RUN
 torchrun --standalone --nproc_per_node=$NPN -m scripts.base_loss
 torchrun --standalone --nproc_per_node=$NPN -m scripts.base_eval
 

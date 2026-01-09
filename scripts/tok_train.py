@@ -14,7 +14,7 @@ def main(
     ctx: typer.Context,
     max_chars: int = opt(10_000_000_000, "Maximum characters to train on (default: 10B)"),
     doc_cap: int = opt(10_000, "Maximum characters per document (default: 10,000)"),
-    vocab_size: int = opt(66536, "Vocabulary size (default: 65536 = 2^16)"),
+    vocab_size: int = opt(32768, "Vocabulary size (default: 32768 = 2^15)"),
 ):
     """Train a GPT-4-type BPE tokenizer using our own BPE tokenizer library."""
 

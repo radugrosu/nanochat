@@ -75,7 +75,9 @@ SPECIAL_TOKENS = [
 # NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
 # I did this because I didn't want to "waste" too many tokens on numbers for smaller vocab sizes.
 # I haven't validated that this is actually a good idea, TODO.
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+SPLIT_PATTERN = (
+    r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+)
 
 
 # -----------------------------------------------------------------------------
@@ -152,9 +154,7 @@ class HuggingFaceTokenizer:
     def id_to_token(self, id: int) -> str:
         return self.tokenizer.id_to_token(id)
 
-    def _encode_one(
-        self, text: str, prepend: int | str | None = None, append: int | str | None = None
-    ) -> list[int]:
+    def _encode_one(self, text: str, prepend: int | str | None = None, append: int | str | None = None) -> list[int]:
         # encode a single string
         # prepend/append can be either a string of a special token or a token id directly.
         assert isinstance(text, str)
@@ -174,12 +174,18 @@ class HuggingFaceTokenizer:
         return self.tokenizer.token_to_id(text)
 
     def get_bos_token_id(self):
-        return self.encode_special("<|bos|>")
+        # Different HuggingFace models use different BOS tokens and there is little consistency
+        # 1) attempt to find a <|bos|> token
+        bos = self.encode_special("<|bos|>")
+        # 2) if that fails, attempt to find a <|endoftext|> token (e.g. GPT-2 models)
+        if bos is None:
+            bos = self.encode_special("<|endoftext|>")
+        # 3) if these fail, it's better to crash than to silently return None
+        assert bos is not None, "Failed to find BOS token in tokenizer"
+        return bos
 
     @overload
-    def encode(
-        self, text: str, *, prepend: int | str | None = None, append: int | str | None = None
-    ) -> list[int]: ...
+    def encode(self, text: str, *, prepend: int | str | None = None, append: int | str | None = None) -> list[int]: ...
     @overload
     def encode(
         self, text: list[str], *, prepend: int | str | None = None, append: int | str | None = None
@@ -227,9 +233,7 @@ class RustBPETokenizer:
         tokenizer = RbpeTokenizer()
         # the special tokens are inserted later in __init__, we don't train them here
         vocab_size_no_special = vocab_size - len(SPECIAL_TOKENS)
-        assert vocab_size_no_special >= 256, (
-            f"vocab_size_no_special must be at least 256, got {vocab_size_no_special}"
-        )
+        assert vocab_size_no_special >= 256, f"vocab_size_no_special must be at least 256, got {vocab_size_no_special}"
         tokenizer.train_from_iterator(text_iterator, vocab_size_no_special, pattern=SPLIT_PATTERN)
         # 2) construct the associated tiktoken encoding for inference
         pattern = tokenizer.get_pattern()
@@ -312,9 +316,7 @@ class RustBPETokenizer:
             else (self.encode_special(prepend) if isinstance(prepend, str) else None)
         )
         append_id = (
-            append
-            if isinstance(append, int)
-            else (self.encode_special(append) if isinstance(append, str) else None)
+            append if isinstance(append, int) else (self.encode_special(append) if isinstance(append, str) else None)
         )
         if isinstance(text, str):
             ids = self.enc.encode_ordinary(text)
@@ -347,9 +349,7 @@ class RustBPETokenizer:
             pickle.dump(self.enc, f)
         print(f"Saved tokenizer encoding to {pickle_path}")
 
-    def render_conversation(
-        self, conversation: Conversation, max_tokens: int = 2048
-    ) -> tuple[list[int], list[int]]:
+    def render_conversation(self, conversation: Conversation, max_tokens: int = 2048) -> tuple[list[int], list[int]]:
         """
         Tokenize a single Chat conversation (which we call a "doc" or "document" here).
         Returns:
@@ -452,9 +452,7 @@ class RustBPETokenizer:
         mask = mask[:max_tokens]
         return ids, mask
 
-    def visualize_tokenization(
-        self, ids: list[int], mask: list[int], with_token_id: bool = False
-    ) -> str:
+    def visualize_tokenization(self, ids: list[int], mask: list[int], with_token_id: bool = False) -> str:
         """Small helper function useful in debugging: visualize the tokenization of render_conversation"""
         RED = "\033[91m"
         GREEN = "\033[92m"
@@ -510,9 +508,7 @@ def get_token_bytes(device: torch.device | str = "cpu"):
 
     base_dir = get_base_dir()
     token_bytes_path = base_dir / "tokenizer" / "token_bytes.pt"
-    assert token_bytes_path.exists(), (
-        f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
-    )
+    assert token_bytes_path.exists(), f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
     with open(token_bytes_path, "rb") as f:
         token_bytes = torch.load(f, map_location=device)
     return token_bytes

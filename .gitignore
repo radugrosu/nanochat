@@ -6,3 +6,8 @@ typings
 target
 eval_bundle
 .env
+
+wandb/
+experiments/
+.claude
+

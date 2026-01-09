@@ -30,6 +30,16 @@ from nanochat.tokenizer import get_token_bytes, get_tokenizer
 from scripts.base_eval import evaluate_model
 
 
+def find_num_heads(model_dim: int, target_head_dim: int = 128) -> int:
+    # Find num_heads that divides model_dim evenly, with head_dim closest to target.
+    ideal = max(1, round(model_dim / target_head_dim))
+    for offset in range(model_dim):
+        for candidate in [ideal + offset, ideal - offset]:
+            if candidate > 0 and model_dim % candidate == 0:
+                return candidate
+    return 1
+
+
 def main(
     ctx: typer.Context,
     run: str = opt("dummy", 'wandb run name default ("dummy" is special - we won\'t log to wandb)'),
@@ -37,32 +47,33 @@ def main(
     device_type: str = opt("", "cuda|cpu|mps (empty => autodetect device in order: CUDA > MPS > CPU)"),
     # Model architecture
     depth: int = opt(20, "The depth of the Transformer model to train, rest of the kwargs are derived"),
+    aspect_ratio: int = opt(64, "model_dim = depth * aspect_ratio"),
+    head_dim: int = opt(128, "Target head dimension for attention heads"),
     max_seq_len: int = opt(2048, "Max context length"),
-    model_dim_aspect_ratio: int = opt(64, "Aspect ratio (usually varied from 64 -> 128 as model size increases)"),
-    head_dim: int = opt(128, "Head dimension"),
     num_kv_heads_factor: int = opt(1, "Number of key-value heads factor"),
     # Training horizon
     num_iterations: int = opt(-1, "Explicit number of steps of the optimization (-1 = disable)"),
     target_flops: float = opt(-1.0, "Calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)"),
-    target_param_data_ratio: int = opt(20, "Calculate num_iterations to maintain fixed data:param ratio (Chinchilla=20) (-1 = disable)"),
+    target_param_data_ratio: int = opt(8, "Calculate num_iterations to maintain fixed data:param ratio (Chinchilla=20) (-1 = disable)"),
     # Optimization
     device_batch_size: int = opt(32, "Per-device batch size (set to not OOM)"),
     total_batch_size: int = opt(524288, "Total desired batch size, in #tokens"),
-    embedding_lr: float = opt(0.2, "Learning rate for the embedding parameters (Adam)"),
+    embedding_lr: float = opt(0.3, "Learning rate for the embedding parameters (Adam)"),
     unembedding_lr: float = opt(0.004, "Learning rate for the unembedding parameters (Adam)"),
     weight_decay: float = opt(0.0, "Weight decay for the embedding/unembedding parameters (Adam)"),
     matrix_lr: float = opt(0.02, "Learning rate for the matrix parameters (Muon)"),
-    grad_clip: float = opt(1.0, "Gradient clipping value (0.0 = disabled)"),
+    adam_beta1: float = opt(0.80, "Adam beta1 for embedding/unembedding"),
+    adam_beta2: float = opt(0.95, "Adam beta2 for embedding/unembedding"),
     # Learning rate scheduler
     warmup_ratio: float = opt(0.0, "Ratio of iterations for LR warmup"),
-    warmdown_ratio: float = opt(0.2, "Ratio of iterations for LR warmdown"),
+    warmdown_ratio: float = opt(0.4, "Ratio of iterations for LR warmdown"),
     final_lr_frac: float = opt(0.0, "Final LR is this fraction of the initial LR"),
     # Evaluation
-    eval_every: int = opt(250, "Every how many steps to evaluate the model for val bpb"),
+    eval_every: int = opt(250, "Every how many steps to evaluate the model for val bpb (-1 = disable)"),
     eval_tokens: int = opt(20 * 524288, "Number of tokens to evaluate val loss on"),
     core_metric_every: int = opt(2000, "Every how many steps to evaluate the core metric (-1 = disable)"),
     core_metric_max_per_task: int = opt(500, "Examples per task in estimating the core metric"),
-    sample_every: int = opt(2000, "Every how many steps to sample from the model"),
+    sample_every: int = opt(2000, "Every how many steps to sample from the model (-1 = disable)"),
     save_every: int = opt(-1, "every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)"),
     # Output
     resume_from_step: int = opt(-1, "resume training from this step of the optimization (-1 = disable)"),
@@ -72,9 +83,9 @@ def main(
 ):
     """Train model.
 
-    Run on a single node: python -m scripts/base_train.py
-
-    Run distributed as: torchrun --nproc_per_node=8 scripts/base_train.py
+    From root directory of the project:
+        Run on a single node: python -m scripts/base_train.py
+        Run distributed as: torchrun --nproc_per_node=8 -m scripts/base_train.py
 
     If you are only on CPU/Macbook, you'll want to train a much much smaller LLM. Example:
 
@@ -107,8 +118,8 @@ def main(
 
     # Model kwargs are derived from the desired depth of the model
     num_layers = depth
-    model_dim = depth * model_dim_aspect_ratio
-    num_heads = max(1, (model_dim + head_dim - 1) // head_dim)
+    model_dim = depth * aspect_ratio
+    num_heads = find_num_heads(model_dim, head_dim)
     num_kv_heads = num_heads * num_kv_heads_factor
     print0(f"num_layers: {num_layers}")
     print0(f"model_dim: {model_dim}")
@@ -124,6 +135,16 @@ def main(
     print0(f"Tokens / micro-batch / rank: {device_batch_size} x {max_seq_len} = {tokens_per_fwdbwd:,}")
     print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
     print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
+    # Batch size scaling for learning rates (hyperparameters were tuned at reference batch size 2^19)
+    batch_lr_scale = 1.0
+    reference_batch_size = 2**19
+    batch_ratio = total_batch_size / reference_batch_size
+    if batch_ratio != 1.0:
+        # SGD: linear scaling with batch size is standard (not used in nanochat)
+        # AdamW: sqrt scaling is standard
+        # Muon: sqrt scaling is an assumption - not fully studied, but it's a second-order-ish optimizer
+        batch_lr_scale = batch_ratio**0.5
+        print0(f"Scaling LRs by {batch_lr_scale:.4f} for batch size {total_batch_size:,} (reference: {reference_batch_size:,})")
     # -----------------------------------------------------------------------------
     # Initialize the Model
     # Create a new model with random weights
@@ -158,7 +179,8 @@ def main(
     model = torch.compile(model, dynamic=False)  # inputs to model will never change shape so dynamic=False is safe
     model = cast(GPT, model)
     num_params = sum(p.numel() for p in model.parameters())
-    print0(f"Number of parameters: {num_params:,}")
+    num_scaling_params = orig_model.num_scaling_params()
+    print0(f"Number of parameters: {num_params:,} (scaling: {num_scaling_params:,})")
     num_flops_per_token = model.estimate_flops()
     print0(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
@@ -171,24 +193,25 @@ def main(
         num_iterations = round(target_flops / (num_flops_per_token * total_batch_size))
         print0(f"Calculated number of iterations from target FLOPs: {num_iterations:,}")
     elif target_param_data_ratio > 0:
-        # calculate the number of iterations from the target param data ratio
-        target_tokens = target_param_data_ratio * num_params
+        # calculate the number of iterations from the target param data ratio (use scaling params per Kaplan et al.)
+        target_tokens = target_param_data_ratio * num_scaling_params
         num_iterations = target_tokens // total_batch_size
         print0(f"Calculated number of iterations from target data:param ratio: {num_iterations:,}")
     else:
         raise ValueError("No training horizon specified")
     total_tokens = total_batch_size * num_iterations
     print0(f"Total number of training tokens: {total_tokens:,}")
-    print0(f"Tokens : Params ratio: {total_tokens / num_params:.1f}")  # Chinchilla is ~20
+    print0(f"Tokens : Params ratio: {total_tokens / num_scaling_params:.1f}")  # Chinchilla is ~20
     print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
     # -----------------------------------------------------------------------------
     # Initialize the Optimizer (Muon for Linear layers, AdamW for embedding and lm_head)
     optimizers = model.setup_optimizers(
-        unembedding_lr=unembedding_lr,
-        embedding_lr=embedding_lr,
-        matrix_lr=matrix_lr,
+        unembedding_lr=unembedding_lr * batch_lr_scale,
+        embedding_lr=embedding_lr * batch_lr_scale,
+        matrix_lr=matrix_lr * batch_lr_scale,
         weight_decay=weight_decay,
+        adam_betas=(adam_beta1, adam_beta2),
     )
     _, muon_optimizer = optimizers
 
@@ -245,6 +268,7 @@ def main(
         total_training_time = loop_state["total_training_time"]
     else:
         step = 0
+        val_bpb = None  # will be set if eval_every > 0
         min_val_bpb = float("inf")
         smooth_train_loss = 0  # EMA of training loss
         total_training_time = 0  # total wall-clock time of training
@@ -259,7 +283,7 @@ def main(
         flops_so_far = num_flops_per_token * total_batch_size * step
 
         # once in a while: evaluate the val bpb (all ranks participate)
-        if last_step or step % eval_every == 0:
+        if eval_every > 0 and (last_step or step % eval_every == 0):
             model.eval()
             val_loader = build_val_loader()
             eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
@@ -297,7 +321,7 @@ def main(
 
         # once in a while: sample from the model (only on master process)
         # use the original uncompiled model because the inputs keep changing shape
-        if master_process and (last_step or (step > 0 and step % sample_every == 0)):
+        if eval_every > 0 and master_process and (last_step or (step > 0 and step % sample_every == 0)):
             model.eval()
             prompts = [
                 "The capital of France is",
@@ -357,12 +381,6 @@ def main(
             loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
             loss.backward()
             x, y, dataloader_state_dict = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
-        # gradient clipping (TODO possibly expertiment with)
-        grad_clip_enabled = grad_clip > 0
-        grad_norm = 0.0
-        if grad_clip_enabled:
-            grad_norm_tensor = torch.nn.utils.clip_grad_norm_(orig_model.parameters(), grad_clip)
-            grad_norm = grad_norm_tensor.item()  # GPU tensor -> CPU float (note: cpu-gpu sync point)
         # step the optimizers
         lrm = get_lr_multiplier(step)
         for opt in optimizers:
@@ -391,15 +409,24 @@ def main(
         mfu = 100 * flops_per_sec / promised_flops_per_sec_h100  # in %
         if step > 10:
             total_training_time += dt  # only count the time after the first 10 steps
-            grad_norm_repr = f" grad norm: {grad_norm:.4f} |" if grad_clip_enabled else ""
+            # Calculate ETA based on average time per step (excluding first 10 steps)
+            steps_done = step - 10
+            if steps_done > 0:
+                avg_time_per_step = total_training_time / steps_done
+                remaining_steps = num_iterations - step
+                eta_seconds = remaining_steps * avg_time_per_step
+                eta_str = f" | eta: {eta_seconds / 60:.1f}m"
+            else:
+                eta_str = ""
+
             print0(
                 f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%)"
                 f" | loss: {debiased_smooth_loss:.6f}"
-                f" |{grad_norm_repr} lrm: {lrm:.2f}"
+                f" | lrm: {lrm:.2f}"
                 f" | dt: {dt * 1000:.2f}ms"
                 f" | tok/sec: {tok_per_sec:,}"
                 f" | mfu: {mfu:.2f}"
-                f" | total time: {total_training_time / 60:.2f}m"
+                f" | total time: {total_training_time / 60:.2f}m{eta_str}"
             )
         if step % wandb_log_every == 0:
             wandb_data = {
@@ -412,8 +439,6 @@ def main(
                 "train/tok_per_sec": tok_per_sec,
                 "train/mfu": mfu,
             }
-            if grad_clip_enabled:
-                wandb_data["train/grad_norm"] = grad_norm
             wandb_run.log(wandb_data)
 
     # state update
@@ -422,7 +447,8 @@ def main(
     # print a few more stats
     print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
     print0(f"Total training time: {total_training_time / 60:.2f}m")
-    print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
+    if val_bpb is not None:
+        print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
     # Log to report
 
@@ -442,7 +468,7 @@ def main(
                 "final_lr_frac": final_lr_frac,
             },
             {  # stats about training outcomes
-                "Minimum validation bpb": min_val_bpb,
+                "Minimum validation bpb": min_val_bpb if val_bpb is not None else None,
                 "Final validation bpb": val_bpb,
                 "CORE metric estimate": results.get("core_metric", None),  # type: ignore
                 "MFU %": f"{mfu:.2f}%",  # type: ignore

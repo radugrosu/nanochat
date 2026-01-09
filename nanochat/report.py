@@ -22,8 +22,10 @@ def run_command(cmd: str) -> str | None:
     """Run a shell command and return output, or None if it fails."""
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
+        if result.stdout.strip():
             return result.stdout.strip()
+        if result.returncode == 0:
+            return ""
         return None
     except Exception as _e:
         return None
@@ -191,24 +193,31 @@ Generated: {timestamp}
 - PyTorch: {sys_info.torch_version}
 
 """
+    # bloat metrics: count lines/chars in git-tracked source files only
+    extensions = ["py", "md", "rs", "html", "toml", "sh"]
+    git_patterns = " ".join(f"'*.{ext}'" for ext in extensions)
+    files_output = run_command(f"git ls-files -- {git_patterns}")
+    file_list = [f for f in (files_output or "").split("\n") if f]
+    num_files = len(file_list)
+    num_lines = 0
+    num_chars = 0
+    if num_files > 0:
+        wc_output = run_command(f"git ls-files -- {git_patterns} | xargs wc -lc 2>/dev/null")
+        if wc_output:
+            total_line = wc_output.strip().split("\n")[-1]
+            parts = total_line.split()
+            if len(parts) >= 2:
+                num_lines = int(parts[0])
+                num_chars = int(parts[1])
+    num_tokens = num_chars // 4  # assume
 
-    # bloat metrics: package all of the source code and assess its weight
-    packaged = run_command(
-        'files-to-prompt . -e py -e md -e rs -e html -e toml -e sh --ignore "*target*" --cxml'
-    )
-    if packaged:
-        num_chars = len(packaged)
-        num_lines = len(packaged.split("\n"))
-        num_files = len([x for x in packaged.split("\n") if x.startswith("<source>")])
-        num_tokens = num_chars // 4  # assume approximately 4 chars per token
+    # count dependencies via uv.lock
+    uv_lock_lines = 0
+    if os.path.exists("uv.lock"):
+        with open("uv.lock", "r", encoding="utf-8") as f:
+            uv_lock_lines = len(f.readlines())
 
-        # count dependencies via uv.lock
-        uv_lock_lines = 0
-        if os.path.exists("uv.lock"):
-            with open("uv.lock", "r", encoding="utf-8") as f:
-                uv_lock_lines = len(f.readlines())
-
-        header += f"""
+    header += f"""
 ### Bloat
 - Characters: {num_chars:,}
 - Lines: {num_lines:,}
@@ -327,9 +336,7 @@ class Report:
             else:
                 start_time = None  # will cause us to not write the total wall clock time
                 bloat_data = "[bloat data missing]"
-                print(
-                    f"Warning: {header_file} does not exist. Did you forget to run `nanochat reset`?"
-                )
+                print(f"Warning: {header_file} does not exist. Did you forget to run `nanochat reset`?")
             # process all the individual sections
             for file_name in EXPECTED_FILES:
                 section_file = os.path.join(report_dir, file_name)
