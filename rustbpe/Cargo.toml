@@ -6,10 +6,20 @@ edition = "2024"
 [dependencies]
 dary_heap = "0.3.8"
 indexmap = "2.12"
-fancy-regex = "0.16.2"
+fancy-regex = "0.17"
 log = "0.4.28"
-pyo3 = { version = "0.26", features = ["extension-module"] }
+# pyo3 = { version = "0.27", features = ["extension-module"] }
+pyo3 = { version = "0.27" }
 pyo3-log = "0.13.1"
+pyo3-stub-gen = "0.17.2"
 ahash = "0.8.12"
 rayon = "1.11.0"
 compact_str = "0.9.0"
+
+[lib]
+name = "rustbpe"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]

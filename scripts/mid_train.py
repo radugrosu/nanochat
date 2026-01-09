@@ -2,7 +2,7 @@ import os
 
 from scripts.common import config_from_context, opt
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_CUDA_CONF"] = "expandable_segments:True"
 
 import time
 from collections import deque
@@ -74,7 +74,7 @@ def main(
     # Compute init
     device_type = autodetect_device_type() if device_type == "" else device_type
     device_type = cast(Literal["cuda", "mps", "cpu"], device_type)
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    ddp, ddp_rank, _, ddp_world_size, device = compute_init(device_type)
     master_process = ddp_rank == 0
     autocast_ctx = (
         torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16)  # type: ignore
@@ -246,7 +246,7 @@ def main(
 
         # save checkpoint at the end of the run (only on master process)
         if master_process and last_step and not dry_run:
-            output_dirname = f"d{depth}"  # e.g. d12
+            output_dirname = model_tag or f"d{depth}"  # e.g. d12
             checkpoint_dir = base_dir / "mid_checkpoints" / output_dirname
             save_checkpoint(
                 checkpoint_dir,

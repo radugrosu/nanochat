@@ -174,7 +174,13 @@ def load_model_from_dir(
     return model, tokenizer, meta_data
 
 
-def load_model(source: str, *args: Any, **kwargs: Any) -> tuple[GPT, RustBPETokenizer, dict[str, Any]]:
+def load_model(
+    source: str,
+    device: torch.device | str,
+    phase: Literal["train", "eval"],
+    model_tag: str | None = None,
+    step: int | None = None,
+) -> tuple[GPT, RustBPETokenizer, dict[str, Any]]:
     model_dir = {
         "base": "base_checkpoints",
         "mid": "mid_checkpoints",
@@ -183,4 +189,4 @@ def load_model(source: str, *args: Any, **kwargs: Any) -> tuple[GPT, RustBPEToke
     }[source]
     base_dir = get_base_dir()
     checkpoints_dir = base_dir / model_dir
-    return load_model_from_dir(checkpoints_dir, *args, **kwargs)
+    return load_model_from_dir(checkpoints_dir, device, phase, model_tag, step)

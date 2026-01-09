@@ -1,5 +1,19 @@
 # nanochat
 
+<!--toc:start-->
+- [nanochat](#nanochat)
+  - [Talk to it](#talk-to-it)
+  - [Quick start](#quick-start)
+  - [Bigger models](#bigger-models)
+  - [Running on CPU / MPS](#running-on-cpu-mps)
+  - [Questions](#questions)
+  - [Tests](#tests)
+  - [Contributing](#contributing)
+  - [Acknowledgements](#acknowledgements)
+  - [Cite](#cite)
+  - [License](#license)
+<!--toc:end-->
+
 ![nanochat logo](dev/nanochat.png)
 
 > The best ChatGPT that $100 can buy.
@@ -8,7 +22,7 @@ This repo is a full-stack implementation of an LLM like ChatGPT in a single, cle
 
 ## Talk to it
 
-To get a sense of the endpoint of this repo, you can currently find [nanochat d32](https://github.com/karpathy/nanochat/discussions/8) hosted on [nanochat.karpathy.ai](https://nanochat.karpathy.ai/). "d32" means that this model has 32 layers in the Transformer neural network. This model has 1.9 billion parameters, it was trained on 38 billion tokens by simply running the single script [run1000.sh](run1000.sh), and the total cost of training was ~$800 (about 33 hours training time on 8XH100 GPU node). While today this is enough to outperform GPT-2 of 2019, it falls dramatically short of modern Large Language Models like GPT-5. When talking to these micro models, you'll see that they make a lot of mistakes, they are a little bit naive and silly and they hallucinate a ton, a bit like children. It's kind of amusing. But what makes nanochat unique is that it is fully yours - fully configurable, tweakable, hackable, and trained by you from start to end. To train and talk to your own, we turn to...
+To get a sense of the endpoint of this repo, you can currently find [nanochat d34](https://github.com/karpathy/nanochat/discussions/314) hosted on [nanochat.karpathy.ai](https://nanochat.karpathy.ai/). "d34" means that this model has 34 layers in the Transformer neural network. This model has 2.2 billion parameters, it was trained on 88 billion tokens by simply running the training script [run1000.sh](run1000.sh) with `--target_param_data_ratio=40` (2x longer than Chinchilla-optimal), and the total cost of training was ~$2,500 (about 100 hours training time on 8XH100 GPU node). While today this is enough to outperform GPT-2 of 2019, it falls dramatically short of modern Large Language Models like GPT-5. When talking to these micro models, you'll see that they make a lot of mistakes, they are a little bit naive and silly and they hallucinate a ton, a bit like children. It's kind of amusing. But what makes nanochat unique is that it is fully yours - fully configurable, tweakable, hackable, and trained by you from start to end. To train and talk to your own, we turn to...
 
 ## Quick start
 

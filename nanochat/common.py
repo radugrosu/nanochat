@@ -40,12 +40,8 @@ class ColoredFormatter(logging.Formatter):
         # Add color to specific parts of the message
         if levelname == "INFO":
             # Highlight numbers and percentages
-            message = re.sub(
-                r"(\d+\.?\d*\s*(?:GB|MB|%|docs))", rf"{self.BOLD}\1{self.RESET}", message
-            )
-            message = re.sub(
-                r"(Shard \d+)", rf"{self.COLORS['INFO']}{self.BOLD}\1{self.RESET}", message
-            )
+            message = re.sub(r"(\d+\.?\d*\s*(?:GB|MB|%|docs))", rf"{self.BOLD}\1{self.RESET}", message)
+            message = re.sub(r"(Shard \d+)", rf"{self.COLORS['INFO']}{self.BOLD}\1{self.RESET}", message)
         return message
 
 
@@ -119,15 +115,19 @@ def print_banner():
     print0(banner)
 
 
-def is_ddp():
-    if dist.is_initialized():
-        return True
-    return int(os.environ.get("RANK", -1)) != -1
+def is_ddp_requested():
+    """True if launched by torchrun. Used to decide wether we should initialize a PG"""
+    return all(k in os.environ for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE"))
+
+
+def is_ddp_initialized():
+    """True if torch.distributed is available and the PG is initialized.
+    Used at cleanup to avoid trying to destroy a non-existent PG."""
+    return dist.is_available() and dist.is_initialized()
 
 
 def get_dist_info():
-    if is_ddp():
-        assert all(var in os.environ for var in ["RANK", "LOCAL_RANK", "WORLD_SIZE"])
+    if is_ddp_requested():
         ddp_rank = int(os.environ["RANK"])
         ddp_local_rank = int(os.environ["LOCAL_RANK"])
         ddp_world_size = int(os.environ["WORLD_SIZE"])
@@ -172,11 +172,11 @@ def compute_init(device_type: Literal["cuda", "mps", "cpu"] = "cuda"):
 
     # Precision
     if device_type == "cuda":
-        torch.set_float32_matmul_precision("high")  # uses tf32 instead of fp32 for matmuls
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
 
     # Distributed setup: Distributed Data Parallel (DDP), optional, and requires CUDA
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    if ddp and device_type == "cuda":
+    ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
+    if ddp_requested and device_type == "cuda":
         device = torch.device("cuda", ddp_local_rank)
         torch.cuda.set_device(device)  # make "cuda" default to this device
         dist.init_process_group(backend="nccl", device_id=device)
@@ -187,12 +187,12 @@ def compute_init(device_type: Literal["cuda", "mps", "cpu"] = "cuda"):
     if ddp_rank == 0:
         logger.info(f"Distributed world size: {ddp_world_size}")
 
-    return ddp, ddp_rank, ddp_local_rank, ddp_world_size, device
+    return ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size, device
 
 
 def compute_cleanup():
     """Companion function to compute_init, to clean things up before script exit"""
-    if is_ddp():
+    if is_ddp_initialized():
         dist.destroy_process_group()
 
 

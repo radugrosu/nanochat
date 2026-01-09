@@ -5,7 +5,7 @@ from typing import cast
 import typer
 from scripts.common import config_from_context, opt
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import time
 from contextlib import nullcontext
 
@@ -138,8 +138,8 @@ def main(
     with torch.device("meta"):
         model_config = GPTConfig(**model_config_kwargs)
         model = GPT(model_config)
-    model.to_empty(device=device)
-    model.init_weights()
+    model.to_empty(device=device)  # All tensors get storage on target device but with uninitialized (garbage) data
+    model.init_weights()  # All tensors get initialized
 
     # If we are resuming, overwrite the model parameters with those of the checkpoint
     base_dir = get_base_dir()

@@ -1,12 +1,11 @@
 use std::cmp::Ordering;
 use std::collections::HashMap as StdHashMap;
 
+use ahash::{AHashMap, AHashSet};
+use compact_str::CompactString;
 use dary_heap::OctonaryHeap;
 use fancy_regex::Regex;
 use pyo3::prelude::*;
-
-use ahash::{AHashMap, AHashSet};
-use compact_str::CompactString;
 use rayon::prelude::*;
 
 // Default GPT-4 style regex pattern for splitting text
@@ -26,7 +25,6 @@ pub struct Tokenizer {
 }
 
 // ------------------------ internal helpers ------------------------
-
 #[derive(Clone, Debug)]
 struct Word {
     ids: Vec<u32>,
@@ -154,7 +152,6 @@ fn count_pairs_parallel(
 }
 
 // ------------------------ END helpers ------------------------
-
 impl Tokenizer {
     /// Core incremental BPE training given unique words and their counts.
     /// `words`: one entry per unique chunk (Vec<u32> of token-ids/bytes).
@@ -220,7 +217,7 @@ impl Tokenizer {
                 let changes = words[word_idx].merge_pair(top.pair, new_id);
                 // Update global pair counts based on this word's count
                 for (pair, delta) in changes {
-                    let delta_total = delta * counts[word_idx] as i32;
+                    let delta_total = delta * counts[word_idx];
                     if delta_total != 0 {
                         *pair_counts.entry(pair).or_default() += delta_total;
                         if delta > 0 {
@@ -263,18 +260,22 @@ impl Tokenizer {
         log::info!("Finished training: {} merges completed", merges_done);
     }
 }
-
+impl Default for Tokenizer {
+    fn default() -> Self {
+        Self {
+            merges: StdHashMap::new(),
+            pattern: String::new(),
+            compiled_pattern: Regex::new("").expect("Empty regex should be valid"),
+        }
+    }
+}
 /// Public methods for the Tokenizer class that will be exposed to Python.
 #[pymethods]
 impl Tokenizer {
     /// Create a new Tokenizer
     #[new]
     pub fn new() -> Self {
-        Self {
-            merges: StdHashMap::new(),
-            pattern: String::new(),
-            compiled_pattern: Regex::new("").expect("Empty regex should be valid"),
-        }
+        Self::default()
     }
 
     /// Train from a streaming iterator (parallel ingestion).
@@ -373,15 +374,12 @@ impl Tokenizer {
                         }
                         m
                     })
-                    .reduce(
-                        || AHashMap::new(),
-                        |mut a, b| {
-                            for (k, v) in b {
-                                *a.entry(k).or_default() += v;
-                            }
-                            a
-                        },
-                    )
+                    .reduce(AHashMap::new, |mut a, b| {
+                        for (k, v) in b {
+                            *a.entry(k).or_default() += v;
+                        }
+                        a
+                    })
             });
 
             // Merge local into global (single-threaded)
@@ -450,6 +448,7 @@ impl Tokenizer {
     }
 
     /// Encode a string into token IDs
+    #[pyo3(signature = (text))]
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut all_ids = Vec::new();
 
@@ -467,10 +466,11 @@ impl Tokenizer {
 
                 for i in 0..ids.len() - 1 {
                     let pair: Pair = (ids[i], ids[i + 1]);
-                    if let Some(&new_id) = self.merges.get(&pair) {
-                        if best_pair.is_none() || new_id < best_pair.unwrap().2 {
-                            best_pair = Some((i, pair, new_id));
-                        }
+                    let Some(&new_id) = self.merges.get(&pair) else {
+                        continue;
+                    };
+                    if best_pair.is_none() || new_id < best_pair.unwrap().2 {
+                        best_pair = Some((i, pair, new_id));
                     }
                 }
 
@@ -488,6 +488,20 @@ impl Tokenizer {
         }
 
         all_ids
+    }
+
+    /// Encode multiple texts in parallel using rayon.
+    /// Return a list of token ID vectors, one per input text.
+    #[pyo3(signature = (texts))]
+    pub fn batch_encode(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<u32>>> {
+        // Release GIL and encode in parallel using rayon
+        let results = py.detach(|| {
+            texts
+                .par_iter()
+                .map(|text| self.encode(text))
+                .collect::<Vec<_>>()
+        });
+        Ok(results)
     }
 }
 

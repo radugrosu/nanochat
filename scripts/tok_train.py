@@ -16,7 +16,7 @@ def main(
     doc_cap: int = opt(10_000, "Maximum characters per document (default: 10,000)"),
     vocab_size: int = opt(66536, "Vocabulary size (default: 65536 = 2^16)"),
 ):
-    """Train a GPT-4-type BPE tokenizer using the HuggingFace Tokenizers library."""
+    """Train a GPT-4-type BPE tokenizer using our own BPE tokenizer library."""
 
     print(f"max_chars: {max_chars:,}")
     print(f"doc_cap: {doc_cap:,}")

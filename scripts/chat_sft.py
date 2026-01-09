@@ -3,7 +3,7 @@ from typing import Iterator, Literal
 
 from scripts.common import config_from_context, opt
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 from contextlib import nullcontext
 
@@ -71,7 +71,7 @@ def main(
 
     # Compute init
     device_type = autodetect_device_type() if device_type == "" else device_type
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    ddp, ddp_rank, _, ddp_world_size, device = compute_init(device_type)
     master_process = ddp_rank == 0
     ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
     autocast_ctx = torch.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
@@ -81,7 +81,7 @@ def main(
     wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=run, config=user_config, save_code=True)
 
     # Load the model and tokenizer
-    model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
+    model, tokenizer, _ = load_model(source, device, phase="train", model_tag=model_tag, step=step)
     engine = Engine(model, tokenizer)  # will be used for inline model evaluation only
 
     # -----------------------------------------------------------------------------
@@ -286,8 +286,8 @@ def main(
     if master_process:
         base_dir = get_base_dir()
         depth = model.config.n_layer
-        model_tag = f"d{depth}"  # base the model tag on the depth of the base model
-        checkpoint_dir = base_dir / "chatsft_checkpoints" / model_tag
+        output_dirname = model_tag or f"d{depth}"  # base the model tag on the depth of the base model
+        checkpoint_dir = base_dir / "chatsft_checkpoints" / output_dirname
         model_config_kwargs = model.config.__dict__
         save_checkpoint(
             checkpoint_dir,

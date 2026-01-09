@@ -42,6 +42,9 @@ class DistAdamW(torch.optim.Optimizer):
         for group in self.param_groups:
             params: list[torch.Tensor] = group["params"]
             for param in params:
+                assert param.shape[0] % world_size == 0, (
+                    f"First dim of parameter shape {param.shape[0]} must be divisible by world size {world_size}"
+                )
                 grad = param.grad
                 grad = cast(torch.Tensor, grad)
                 rank_size = grad.shape[0] // world_size

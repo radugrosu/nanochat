@@ -21,6 +21,7 @@ python -m pytest tests/test_rustbpe.py -v -s
 import time
 from collections import Counter, defaultdict
 from typing import Callable, Iterable, ParamSpec
+import warnings
 
 import pytest
 import regex as re
@@ -34,15 +35,15 @@ from tokenizers.trainers import BpeTrainer
 
 import rustbpe
 
-GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+GPT4_SPLIT_PATTERN = (
+    r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+)
 
 # -----------------------------------------------------------------------------
 # Reference tokenizer, pretty much copy pasted and pruned a bit from minbpe
 
 
-def get_stats(
-    ids: list[int], counts: dict[tuple[int, int], int] | None = None
-) -> dict[tuple[int, int], int]:
+def get_stats(ids: list[int], counts: dict[tuple[int, int], int] | None = None) -> dict[tuple[int, int], int]:
     """
     Given a list of integers, return a dictionary of counts of consecutive pairs
     Example: [1, 2, 3, 1, 2] -> {(1, 2): 2, (2, 3): 1, (3, 1): 1}
@@ -138,9 +139,7 @@ class RegexTokenizer:
             vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
             # prints
             if verbose:
-                print(
-                    f"merge {i + 1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences"
-                )
+                print(f"merge {i + 1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
 
         # save class variables
         self.merges = merges  # used in encode()
@@ -321,8 +320,7 @@ class FastRegexTokenizer:
                     # chunk_ids is already modified at this point
                     chunk_ids = ids[chunk_idx]
                     contains_pair = any(
-                        (chunk_ids[j], chunk_ids[j + 1]) == changed_pair
-                        for j in range(len(chunk_ids) - 1)
+                        (chunk_ids[j], chunk_ids[j + 1]) == changed_pair for j in range(len(chunk_ids) - 1)
                     )
                     if contains_pair:
                         positions[changed_pair].add(chunk_idx)
@@ -339,9 +337,7 @@ class FastRegexTokenizer:
 
             # prints
             if verbose:
-                print(
-                    f"merge {i + 1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences"
-                )
+                print(f"merge {i + 1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
         # save class variables
         self.merges = merges  # used in encode()
         self.vocab = vocab  # used in decode()
@@ -421,9 +417,7 @@ class HuggingFaceTokenizer:
         # Normalizer: None
         tokenizer.normalizer = None  # type: ignore
         # Pre-tokenizer: GPT-4 style
-        gpt4_split_regex = Regex(
-            GPT4_SPLIT_PATTERN
-        )  # huggingface demands that you wrap it in Regex!!
+        gpt4_split_regex = Regex(GPT4_SPLIT_PATTERN)  # huggingface demands that you wrap it in Regex!!
         tokenizer.pre_tokenizer = pre_tokenizers.Sequence(
             [
                 pre_tokenizers.Split(pattern=gpt4_split_regex, behavior="isolated", invert=False),
@@ -520,9 +514,7 @@ def test_correctness(enwik8_small: str):
     # Train slow reference
     print("\nTraining slow reference...")
     slow_reference_tokenizer = RegexTokenizer()
-    ambiguous_flag, slow_reference_train_time = time_function(
-        slow_reference_tokenizer.train, text, vocab_size
-    )
+    ambiguous_flag, slow_reference_train_time = time_function(slow_reference_tokenizer.train, text, vocab_size)
     slow_reference_ids, slow_reference_encode_time = time_function(
         slow_reference_tokenizer.encode_ordinary, encode_text
     )
@@ -531,9 +523,7 @@ def test_correctness(enwik8_small: str):
     print(slow_reference_ids[:20])
 
     if ambiguous_flag:
-        print(
-            "‼️ WARNING: merge order was detected to be ambiguous given current text and vocab size"
-        )
+        print("‼️ WARNING: merge order was detected to be ambiguous given current text and vocab size")
         print("The implementation could be correct but we might see different results below")
     else:
         print("✅ Merge order is NOT ambiguous")
@@ -555,9 +545,7 @@ def test_correctness(enwik8_small: str):
 
     # Train HuggingFace
     print("\nTraining HuggingFace...")
-    hf_tokenizer, hf_train_time = time_function(
-        HuggingFaceTokenizer.train_from_iterator, [text], vocab_size
-    )
+    hf_tokenizer, hf_train_time = time_function(HuggingFaceTokenizer.train_from_iterator, [text], vocab_size)
     hf_ids, hf_encode_time = time_function(hf_tokenizer.encode_ordinary, encode_text)
     print(f"HuggingFace train time: {hf_train_time:.4f}s")
     print(f"HuggingFace encode time: {hf_encode_time:.4f}s")
@@ -653,9 +641,7 @@ def test_interface(enwik8_small: str):
     # Simple train test
     vocab_size = 300
     tok = RustBPETokenizer.train_from_iterator([enwik8_small], vocab_size)
-    assert tok.get_vocab_size() == vocab_size, (
-        f"Expected vocab size {vocab_size}, got {tok.get_vocab_size()}"
-    )
+    assert tok.get_vocab_size() == vocab_size, f"Expected vocab size {vocab_size}, got {tok.get_vocab_size()}"
     print(f"✅ Trained tokenizer with vocab size {vocab_size}")
 
     # Encode/decode text
@@ -676,9 +662,7 @@ def test_interface(enwik8_small: str):
     # append/prepend functionality
     ids_special = tok.encode(encode_text, prepend="<|bos|>", append="<|bos|>")
     bos_token_id = tok.encode_special("<|bos|>")
-    assert ids_special == [bos_token_id] + ids + [bos_token_id], (
-        "Special tokens not correctly added"
-    )
+    assert ids_special == [bos_token_id] + ids + [bos_token_id], "Special tokens not correctly added"
     print("✅ append/prepend OK")
 
     # Save/load test through a temporary directory
@@ -688,3 +672,74 @@ def test_interface(enwik8_small: str):
         ids_reloaded = tok_reloaded.encode(encode_text)
         assert ids_reloaded == ids, "Reloaded tokenizer should produce same results"
         print("✅ Save/load through temporary directory OK")
+
+
+def test_batch_encode_correctness(enwik8_small):
+    """Quick correctness test for batch_encode()"""
+    text = enwik8_small
+    vocab_size = 512
+    tokenizer = rustbpe.Tokenizer()
+    tokenizer.train_from_iterator([text], vocab_size)
+    # Test with various batch sizes and edge cases
+    test_texts = [
+        "Hello world",
+        "The quick brown fox",
+        "jumps over the lazy dog",
+        "",  # empty string
+        "a",  # single char
+    ]
+    # Compare batch vs individual encoding
+    individual = [tokenizer.encode(t) for t in test_texts]
+    batched = tokenizer.batch_encode(test_texts)
+    assert individual == batched, "Batch encoding should match individual encoding"
+    print("✅ batch_encode() correctness verified")
+
+
+@pytest.mark.slow
+def test_batch_encode_performance(enwik8_large):
+    """
+    Benchmark batch_encode() vs sequential encode() loop.
+    Demonstrates parallelization speedup.
+    """
+    # Setup
+    text = enwik8_large  # 10MB dataset
+    vocab_size = 2048
+    # Train tokenizer
+    print("\nTraining tokenizer...")
+    tokenizer = rustbpe.Tokenizer()
+    tokenizer.train_from_iterator([text], vocab_size)
+    # Create test batch: split text into chunks
+    chunk_size = 50_000  # ~50KB per chunk
+    chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    chunks = chunks[:20]  # Use first 20 chunks (~1MB total)
+    print("\nBatch encoding benchmark:")
+    print(f"  Number of texts: {len(chunks)}")
+    print(f"  Avg text length: {sum(len(c) for c in chunks) / len(chunks):.0f} chars")
+
+    # Benchmark 1: Sequential encoding (baseline)
+    print("\n  [1/3] Sequential encode() loop...")
+    sequential_results, sequential_time = time_function(lambda: [tokenizer.encode(chunk) for chunk in chunks])
+    print(f"    Time: {sequential_time:.4f}s")
+
+    # Benchmark 2: Parallel batch_encode()
+    print("  [2/3] Parallel batch_encode()...")
+    batch_results, batch_time = time_function(tokenizer.batch_encode, chunks)
+    print(f"    Time: {batch_time:.4f}s")
+
+    # Verify correctness
+    print("  [3/3] Verifying correctness...")
+    assert len(batch_results) == len(sequential_results), "Result count mismatch"
+    for i, (seq, batch) in enumerate(zip(sequential_results, batch_results)):
+        assert seq == batch, f"Mismatch at index {i}"
+    print("    ✓ All results match")
+
+    # Report speedup
+    speedup = sequential_time / batch_time
+    print("\n  Performance Results:")
+    print(f"    Sequential: {sequential_time:.4f}s")
+    print(f"    Batch:      {batch_time:.4f}s")
+    print(f"    Speedup:    {speedup:.2f}x")
+
+    # Assert meaningful speedup (at least 1.5x on multi-core)
+    if speedup < 1.5:
+        warnings.warn(f"batch_encode() speedup was only {speedup:.2f}x (expected >1.5x)")

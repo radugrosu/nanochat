@@ -174,6 +174,9 @@ def evaluate_model(
 def main(
     hf_path: str | None = opt(None, "HF model path to evaluate"),
     max_per_task: int = opt(-1, "Max. num. of examples per task to eval (-1 = disable)"),
+    model_tag: str | None = opt(None, "Optional model checkpoint tag (default=None)"),
+    model_step: int | None = opt(None, "Optional model checkpoint step (default=None)"),
+    device_type: str = opt("", "Device type: cuda|cpu|mps (empty => autodetect)"),
 ):
     """Evaluate the CORE metric for a given model.
 
@@ -203,7 +206,7 @@ def main(
         model_slug = hf_path.replace("/", "-")  # for the output csv file
     else:
         # load a local model from the file system
-        model, tokenizer, meta = load_model("base", device, phase="eval")
+        model, tokenizer, meta = load_model("base", device, phase="eval", model_tag=model_tag, step=model_step)
         model_name = f"base_model (step {meta['step']})"  # just for logging
         model_slug = f"base_model_{meta['step']:06d}"  # for the output csv file
 

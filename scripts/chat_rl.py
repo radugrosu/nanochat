@@ -69,6 +69,8 @@ def main(
     run: str = opt("dummy", "wandb run name"),
     # Model & Runtime
     source: Literal["mid", "sft"] = opt("sft", "Source of the model"),
+    model_tag: str | None = opt(None, "Model tag to load the model from (base model or midtrained model)"),
+    step: int | None = opt(None, "Step to load the model from (base model or midtrained model)"),
     dtype: str = opt("bfloat16", "Data type for model weights"),
     # Training Configuration
     device_batch_size: int = opt(8, "No forward pass will go above this to not OOM"),
@@ -118,7 +120,7 @@ def main(
     wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=run, config=user_config)
 
     # Init model and tokenizer
-    model, tokenizer, meta = load_model(source, device, phase="eval")
+    model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
     engine = Engine(model, tokenizer)  # for sampling rollouts
 
     # -----------------------------------------------------------------------------
@@ -330,8 +332,8 @@ def main(
         if master_process and ((step > 0 and step % save_every == 0) or step == num_steps - 1):
             base_dir = get_base_dir()
             depth = model.config.n_layer
-            model_tag = f"d{depth}"  # base the model tag on the depth of the base model
-            checkpoint_dir = base_dir / "chatrl_checkpoints" / model_tag
+            output_dirname = model_tag or f"d{depth}"  # base the model tag on the depth of the base model
+            checkpoint_dir = base_dir / "chatrl_checkpoints" / output_dirname
             model_config_kwargs = model.config.__dict__  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
             save_checkpoint(
                 checkpoint_dir,

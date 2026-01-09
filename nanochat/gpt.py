@@ -11,7 +11,6 @@ Notable features:
 - Group-Query Attention (GQA) support for more efficient inference
 """
 
-import math
 from dataclasses import asdict, dataclass
 from functools import partial
 from typing import Iterable, Literal, Protocol, cast
@@ -21,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from nanochat.adamw import DistAdamW
-from nanochat.common import get_dist_info
+from nanochat.common import get_dist_info, print0
 from nanochat.kvcache import KVCache
 from nanochat.muon import DistMuon, Muon
 
@@ -71,11 +70,10 @@ def precompute_rope(
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     assert x.ndim == 4  # multihead attention
     d = x.shape[3] // 2
-    x1, x2 = x[..., :d], x[..., d:]  # split up last time into two halves
+    x1, x2 = x[..., :d], x[..., d:]  # split up last dim into two halves
     y1 = x1 * cos + x2 * sin  # rotate pairs of dims
     y2 = x1 * (-sin) + x2 * cos
     out = torch.cat([y1, y2], 3)  # re-assemble
-    out = out.to(x.dtype)  # ensure input/output dtypes match
     return out
 
 
@@ -106,7 +104,9 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
-    def forward(self, x: torch.Tensor, cos_sin: torch.Tensor, kv_cache: KVCache | None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, cos_sin: tuple[torch.Tensor, torch.Tensor], kv_cache: KVCache | None
+    ) -> torch.Tensor:
         B, T, _ = x.size()
 
         # Project the input to get queries, keys, and values
@@ -177,7 +177,7 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x: torch.Tensor, cos_sin: torch.Tensor, kv_cache: KVCache) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cos_sin: tuple[torch.Tensor, torch.Tensor], kv_cache: KVCache) -> torch.Tensor:
         x = x + self.attn(norm(x), cos_sin, kv_cache)
         x = x + self.mlp(norm(x))
         return x
@@ -190,19 +190,27 @@ class ModuleSequence(Protocol):
 
 
 class GPT(nn.Module):
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig, pad_vocab_size_to: int = 64):
         super().__init__()
         self.config = config
+        # For DDP, we want vocab_size divisible by world_size. Also, there are potential performance benefits, see:
+        # https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.resize_token_embeddings
+        padded_vocab_size = ((config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to) * pad_vocab_size_to
+        if padded_vocab_size != config.vocab_size:
+            print0(
+                f"Padding vocab_size from {config.vocab_size} to {padded_vocab_size} to be divisible by {pad_vocab_size_to}"
+            )
+
         self.transformer = nn.ModuleDict(
             {
-                "wte": nn.Embedding(config.vocab_size, config.n_embd),
+                "wte": nn.Embedding(padded_vocab_size, config.n_embd),
                 "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
             }
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # To support meta device initialization, we init the rotary embeddings here, but it's fake
+        self.lm_head = nn.Linear(config.n_embd, padded_vocab_size, bias=False)
+        # To support meta device initialization, we init the rotary embeddings here, but with "fake" meta tensors only.
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
-        # so let's just over-compute them, but assert fail if we ever reach that amount.
+        # so let's just over-compute them by 10x, but assert fail if we ever reach that amount.
         # In the future we can dynamically grow the cache, for now it's fine.
         self.rotary_seq_len = config.sequence_len * 10  # 10X over-compute should be enough, TODO make nicer?
         head_dim = config.n_embd // config.n_head
@@ -228,29 +236,33 @@ class GPT(nn.Module):
         self.cos, self.sin = cos, sin
 
     def init_weights(self):
-        self.apply(self._init_weights)
-        # zero out classifier weights
-        torch.nn.init.zeros_(self.lm_head.weight)
-        # zero out c_proj weights in all blocks
+        """Initialize the full model in this one function for maximum clarity.
+        wte (embedding):     normal, std=1.0
+        lm_head:             normal, std=0.001
+        for each block:
+            attn.c_q:        uniform, std=1/sqrt(n_embd)
+            attn.c_k:        uniform, std=1/sqrt(n_embd)
+            attn.c_v:        uniform, std=1/sqrt(n_embd)
+            attn.c_proj:     zeros
+            mlp.c_fc:        uniform, std=1/sqrt(n_embd)
+            mlp.c_proj:      zeros
+        """
+        torch.nn.init.normal_(self.wte.weight, mean=0.0, std=1.0)
+        torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
+        n_embd = self.config.n_embd
+        s = (3 / n_embd) ** 0.5
         for block in self.h:
+            torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)  # weights use Uniform to avoid outliers
+            torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
+            torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
+            torch.nn.init.zeros_(block.attn.c_proj.weight)  # projections are zero
+            torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
-            torch.nn.init.zeros_(block.attn.c_proj.weight)
         # init the rotary embeddings
         self.init_buffers()
+        # Cast token embeddings to bf16: optimizer can tolerate it and it saves memory
         if self.wte.weight.device.type == "cuda":
             self.wte.to(dtype=torch.bfloat16)
-
-    def _init_weights(self, module: nn.Module):
-        if isinstance(module, nn.Linear):
-            # https://arxiv.org/pdf/2310.17813
-            fan_out = module.weight.size(0)
-            fan_in = module.weight.size(1)
-            std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            if (bias := getattr(module, "bias")) is not None:
-                torch.nn.init.zeros_(bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=1.0)
 
     def get_device(self) -> torch.device:
         return self.wte.weight.device
@@ -285,8 +297,7 @@ class GPT(nn.Module):
         # Create the AdamW optimizer for the embedding and lm_head
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
-        if rank == 0:
-            print(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
+        print0(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
         adam_groups = [
             dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
@@ -327,7 +338,7 @@ class GPT(nn.Module):
         cos_sin = (
             self.cos[:, T0 : T0 + T],
             self.sin[:, T0 : T0 + T],
-        )  # truncate cache to current sequence length
+        )  # truncate rotary embeddings to current sequence length
 
         # Forward the trunk of the Transformer
         x = self.wte(idx)
@@ -337,9 +348,10 @@ class GPT(nn.Module):
         x = norm(x)
 
         # Forward the lm_head (compute logits)
-        softcap = 15
         logits = self.lm_head(x)
+        logits = logits[:, : self.config.vocab_size]
         logits = logits.float()  # use tf32/fp32 for logits
+        softcap = 15
         logits = softcap * torch.tanh(logits / softcap)  # logits softcap
         if targets is not None:
             # training mode: compute and return the loss
