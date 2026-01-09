@@ -116,10 +116,10 @@ If you'd like to tinker with nanochat on your Macbook or a CPU machine, there is
 nanochat is designed to be short and sweet. One big advantage of this is that we can package up all of the files together and copy paste them to your favorite LLM to ask arbitrary questions. As an example, I like to package up the repo using the [files-to-prompt](https://github.com/simonw/files-to-prompt) utility like so:
 
 ```bash
-files-to-prompt . -e py -e md -e rs -e html -e toml -e sh --ignore "*target*" --cxml > packaged.txt
+files-to-prompt . -e py -e md -e rs -e html -e toml -e sh --cxml > packaged.txt
 ```
 
-This includes all py, rs, html, toml, sh files, excludes the `rustbpe/target` folder, and chooses the cxml output format. Everything is written to the `packaged.txt` file, which atm measures ~330KB (i.e. well below ~100K tokens for a state of the art LLM), and ~8K lines of code in 45 files.
+This includes all py, html, toml, sh files, excludes the `rustbpe/target` folder, and chooses the cxml output format. Everything is written to the `packaged.txt` file, which atm measures ~330KB (i.e. well below ~100K tokens for a state of the art LLM), and ~8K lines of code in 45 files.
 
 Alternatively, I recommend using [DeepWiki](https://deepwiki.com/karpathy/nanochat) from Devin/Cognition to ask questions of this repo. In the URL of this repo, simply change github.com to deepwiki.com, and you're off.
 
@@ -128,7 +128,7 @@ Alternatively, I recommend using [DeepWiki](https://deepwiki.com/karpathy/nanoch
 I haven't invested too much here but some tests exist, especially for the tokenizer. Run e.g. as:
 
 ```bash
-python -m pytest tests/test_rustbpe.py -v -s
+python -m pytest tests/test_engine.py -v -s
 ```
 
 ## Contributing

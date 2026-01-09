@@ -49,9 +49,6 @@ python -m nanochat.report reset
 
 # -----------------------------------------------------------------------------
 # Tokenizer
-# Build the rustbpe Tokenizer
-uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
-
 # each data shard is ~250M chars
 # each shard is ~100MB of text (compressed)
 python -m nanochat.dataset --num-files 1
